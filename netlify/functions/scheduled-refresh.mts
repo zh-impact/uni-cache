@@ -5,6 +5,7 @@ import { redisQueueKey } from '../lib/key.mjs';
 import { acquire } from '../lib/rate-limit.mjs';
 import { getCacheEntry, setCacheEntry, computeExpiresAt } from '../lib/cache.mjs';
 import type { CacheDataEncoding, CacheEntry, RefreshJob } from '../lib/types.mjs';
+import { runOnce } from '../lib/runner.mjs';
 
 const MAX_PER_SOURCE = 20; // 每源单次最多处理作业数
 const TIME_BUDGET_MS = 8_000; // 单次执行最大时间预算（毫秒）
@@ -41,7 +42,9 @@ function buildURL(base: string, path: string, q: Record<string, any> | null | un
   return u.toString();
 }
 
-async function pickDataAndEncoding(res: Response): Promise<{ data: any; encoding: CacheDataEncoding; contentType: string | null }> {
+async function pickDataAndEncoding(
+  res: Response
+): Promise<{ data: any; encoding: CacheDataEncoding; contentType: string | null }> {
   const ct = res.headers.get('content-type');
   const cts = (ct || '').toLowerCase();
   if (cts.includes('application/json')) {
@@ -114,145 +117,8 @@ export default async (req: Request, _context: Context) => {
     if (evt?.next_run) console.log('scheduled-refresh next_run:', evt.next_run);
   } catch {}
 
-  const started = Date.now();
-  const sources = (await sql/*sql*/`
-    SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s
-    FROM sources
-    ORDER BY id
-  `) as unknown as SourceRow[];
-
-  const perSource: Record<string, { dequeued: number; updated: number; not_modified: number; errors: number }> = {};
-
-  // Neon 返回 JSON 列可能为 string，这里对字段做一次宽松解析
-  const parseMaybeObj = <T extends unknown,>(v: unknown): T | null => {
-    if (!v) return null;
-    if (typeof v === 'string') {
-      try {
-        const o = JSON.parse(v);
-        return (o ?? null) as T | null;
-      } catch {
-        return null;
-      }
-    }
-    if (typeof v === 'object') return v as T;
-    return null;
-  };
-
-  for (const src of sources) {
-    perSource[src.id] = { dequeued: 0, updated: 0, not_modified: 0, errors: 0 };
-    const qkey = redisQueueKey(src.id);
-    const rlCfg = parseMaybeObj<{ per_minute?: number; burst?: number }>(src.rate_limit);
-    const perMinute = Math.max(0, rlCfg?.per_minute ?? 5);
-    const burst = Math.max(0, rlCfg?.burst ?? 0);
-
-    for (let i = 0; i < MAX_PER_SOURCE; i++) {
-      if (Date.now() - started > TIME_BUDGET_MS) break; // 时间预算兜底
-
-      const raw = await redis.lpop<string>(qkey);
-      if (!raw) break; // 队列空
-      perSource[src.id].dequeued++;
-
-      let job: RefreshJob | null = null;
-      try {
-        job = JSON.parse(raw) as RefreshJob;
-      } catch (e) {
-        console.warn('invalid job payload, dropped:', e);
-        continue;
-      }
-      if (!job?.key) continue;
-
-      // 限速（简单固定窗）：仅在取到作业后扣额度；若不允许，放回队尾并停止当前源
-      const rl = await acquire(src.id, { per_minute: perMinute, burst });
-      if (!rl.allowed) {
-        await redis.rpush(qkey, raw);
-        break;
-      }
-
-      try {
-        // 条件请求：若已有缓存则携带 ETag/If-Modified-Since
-        const prev: CacheEntry | null = await getCacheEntry(src.id, job.key);
-        const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
-        if (prev?.meta?.etag) headers['If-None-Match'] = prev.meta.etag;
-        else if (prev?.meta?.last_modified) headers['If-Modified-Since'] = prev.meta.last_modified;
-
-        const url = buildURL(src.base_url, job.key, parseMaybeObj<Record<string, any>>(src.default_query));
-        const res = await fetchWithRetry(url, { method: 'GET', headers }, { attempts: 2, baseDelayMs: 200, timeoutMs: 2500 });
-
-        if (res.status === 304 && prev) {
-          // 未修改：续期 TTL，并更新 cached_at
-          const ttl_s = Number(src.cache_ttl_s ?? prev.meta.ttl_s ?? 600);
-          const entry: CacheEntry = {
-            data: prev.data,
-            meta: {
-              ...prev.meta,
-              expires_at: computeExpiresAt(ttl_s),
-              ttl_s,
-            },
-          };
-          await setCacheEntry(src.id, job.key, entry, { ttl_s });
-          perSource[src.id].not_modified++;
-          continue;
-        }
-
-        if (!res.ok) {
-          if (res.status === 429 || res.status === 502 || res.status === 503) {
-            // 视为瞬态错误：将作业放回队列尾部（增加 attempts），稍后重试
-            const nextAttempts = (job.attempts ?? 0) + 1;
-            if (nextAttempts <= MAX_ATTEMPTS) {
-              const requeue = { ...job, attempts: nextAttempts };
-              await redis.rpush(qkey, JSON.stringify(requeue));
-            }
-          }
-          perSource[src.id].errors++;
-          console.warn('origin non-2xx', { source_id: src.id, key: job.key, status: res.status });
-          continue;
-        }
-
-        const { data, encoding, contentType } = await pickDataAndEncoding(res);
-        const etag = res.headers.get('etag');
-        const lastMod = res.headers.get('last-modified');
-        const ttl_s = Number(src.cache_ttl_s ?? 600);
-        const entry: CacheEntry = {
-          data,
-          meta: {
-            source_id: src.id,
-            key: job.key,
-            cached_at: new Date().toISOString(), // 将被 setCacheEntry 覆盖为当前时间
-            expires_at: computeExpiresAt(ttl_s),
-            stale: false, // 将由 setCacheEntry 重新计算
-            ttl_s,
-            etag: etag ?? null,
-            last_modified: lastMod ?? null,
-            origin_status: res.status,
-            content_type: contentType ?? null,
-            data_encoding: encoding,
-          },
-        };
-        await setCacheEntry(src.id, job.key, entry, { ttl_s });
-        perSource[src.id].updated++;
-      } catch (e) {
-        // 可能是网络错误/超时：按瞬态处理，回推队列（带 attempts 上限）
-        try {
-          const nextAttempts = (job?.attempts ?? 0) + 1;
-          if (job?.key && nextAttempts <= MAX_ATTEMPTS) {
-            const requeue = { ...job, attempts: nextAttempts };
-            await redis.rpush(qkey, JSON.stringify(requeue));
-          }
-        } catch {}
-        perSource[src.id].errors++;
-        console.error('refresh error', { source_id: src.id, key: job?.key, err: String(e) });
-      }
-    }
-  }
-
-  const summary = {
-    ok: true,
-    endpoint: 'scheduled-refresh',
-    processed_sources: Object.keys(perSource).length,
-    per_source: perSource,
-    duration_ms: Date.now() - started,
-  };
-  return new Response(JSON.stringify(summary, null, 2), {
+  const summary = await runOnce({});
+  return new Response(JSON.stringify({ endpoint: 'scheduled-refresh', ...summary }, null, 2), {
     status: 200,
     headers: { 'content-type': 'application/json; charset=utf-8' },
   });
