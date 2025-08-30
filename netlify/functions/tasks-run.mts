@@ -33,9 +33,13 @@ export default async (req: Request, _context: Context) => {
   // 可选：当手动触发且队列为空时，先对指定 keys 入队（继续走队列语义）
   const keys: string[] = Array.isArray(body?.keys) ? (body.keys as string[]) : [];
   let prefetch: null | { enqueued: number; duplicates: number; idempotent_rejects: number; task_ids: string[] } = null;
+  let queue_len_before: number | null = null;
+  let queue_len_after_enqueue: number | null = null;
+  let queue_len_after_run: number | null = null;
   if (source_id && keys.length > 0) {
     const qkey = redisQueueKey(source_id);
     const qlen = await redis.llen(qkey);
+    queue_len_before = qlen;
     if (qlen === 0) {
       const idempotencyKey = req.headers.get("Idempotency-Key");
       const jobs = keys.map((k: string) => ({ source_id, key: k }));
@@ -45,17 +49,43 @@ export default async (req: Request, _context: Context) => {
       const duplicates = results.filter((r) => r.reason === "duplicate").length;
       const idempRejects = results.filter((r) => r.reason === "idempotent_reject").length;
       prefetch = { enqueued, duplicates, idempotent_rejects: idempRejects, task_ids };
+      queue_len_after_enqueue = await redis.llen(qkey);
+      console.log("tasks-run prefetch:", {
+        source_id,
+        keys_count: keys.length,
+        queue_len_before,
+        queue_len_after_enqueue,
+        enqueued,
+        duplicates,
+        idempotent_rejects: idempRejects,
+        task_ids_count: task_ids.length,
+      });
+    } else {
+      console.log("tasks-run skip prefetch because queue not empty:", { source_id, queue_len_before });
     }
   }
 
-  const summary = await runOnce({
+  const runOpts = {
     source_id: source_id ?? undefined,
     maxPerSource: maxPerSource,
     timeBudgetMs: timeBudgetMs,
-  });
+  } as const;
+  console.log("tasks-run invoking runOnce with:", runOpts);
+  const summary = await runOnce({ ...runOpts });
+  if (source_id) {
+    const qkey = redisQueueKey(source_id);
+    queue_len_after_run = await redis.llen(qkey);
+  }
+  console.log("tasks-run runOnce summary:", { summary, queue_len_after_run });
 
   const resp: any = { ...summary, endpoint: "tasks-run", source_id: source_id ?? null };
   if (prefetch) resp.prefetch = prefetch;
+  resp.debug = {
+    queue_len_before,
+    queue_len_after_enqueue,
+    queue_len_after_run,
+    run_opts: runOpts,
+  };
   return json(resp, 200);
 };
 

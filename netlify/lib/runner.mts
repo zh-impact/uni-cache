@@ -138,16 +138,19 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
   const started = Date.now();
   const maxPerSource = Math.max(1, Math.floor(opts.maxPerSource ?? DEFAULT_MAX_PER_SOURCE));
   const timeBudgetMs = Math.max(500, Math.floor(opts.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS));
+  console.log('runOnce start', { source_id: opts.source_id ?? null, maxPerSource, timeBudgetMs });
 
   const sources: SourceRow[] = opts.source_id
     ? ((await sql/*sql*/`SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s FROM sources WHERE id = ${opts.source_id} ORDER BY id`) as unknown as SourceRow[])
     : ((await sql/*sql*/`SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s FROM sources ORDER BY id`) as unknown as SourceRow[]);
 
   const perSource: Record<string, { dequeued: number; updated: number; not_modified: number; errors: number }> = {};
-  console.log('sources:', sources);
+  console.log('sources:', sources.map(s => s.id));
   for (const src of sources) {
     perSource[src.id] = { dequeued: 0, updated: 0, not_modified: 0, errors: 0 };
     const qkey = redisQueueKey(src.id);
+    const initialLen = await redis.llen(qkey);
+    console.log('queue init', { source_id: src.id, queue_len: initialLen });
 
     const rlCfg = parseMaybeObj<{ per_minute?: number; burst?: number }>(src.rate_limit);
     const perMinute = Math.max(0, rlCfg?.per_minute ?? 5);
@@ -157,7 +160,10 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       if (Date.now() - started > timeBudgetMs) break; // 时间预算兜底
 
       const raw = await redis.lpop<string>(qkey);
-      if (!raw) break; // 队列空
+      if (!raw) {
+        console.log('queue empty', { source_id: src.id, i, dequeued: perSource[src.id].dequeued });
+        break; // 队列空
+      }
       perSource[src.id].dequeued++;
 
       let job: RefreshJob | null = null;
@@ -174,6 +180,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       const rl = await acquire(src.id, { per_minute: perMinute, burst });
       if (!rl.allowed) {
         await redis.rpush(qkey, raw);
+        console.log('rate limit deny', { source_id: src.id, rl });
         break;
       }
 
@@ -200,6 +207,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
           };
           await setCacheEntry(src.id, job.key, entry, { ttl_s });
           perSource[src.id].not_modified++;
+          console.log('not_modified; ttl extended', { source_id: src.id, key: job.key, ttl_s });
           continue;
         }
 
@@ -211,6 +219,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
               const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
               await redis.rpush(qkey, JSON.stringify(requeue));
             }
+            console.warn('requeue due to upstream', { source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
           }
           perSource[src.id].errors++;
           console.warn('origin non-2xx', { source_id: src.id, key: job.key, status: res.status });
@@ -239,6 +248,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         };
         await setCacheEntry(src.id, job.key, entry, { ttl_s });
         perSource[src.id].updated++;
+        console.log('cache updated', { source_id: src.id, key: job.key, status: res.status, ttl_s, content_type: contentType, encoding });
       } catch (e) {
         // 可能是网络错误/超时：按瞬态处理，回推队列（带 attempts 上限）
         try {
@@ -247,6 +257,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
             const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
             await redis.rpush(qkey, JSON.stringify(requeue));
           }
+          console.warn('requeue due to error', { source_id: src.id, key: job?.key, next_attempts: (job?.attempts ?? 0) + 1 });
         } catch {}
         perSource[src.id].errors++;
         console.error('refresh error', { source_id: src.id, key: job?.key, err: String(e) });

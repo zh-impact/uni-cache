@@ -192,8 +192,42 @@
 
 ### POST /api/v1/tasks/run
 - 描述：手动触发一个后台采集周期（遵守每源限速）。
-- 查询：`source_id`（可选，不传则对所有源按配置的计划执行一轮）。
-- 响应 202：`{"task_id": "t_run_001"}`
+- 查询/请求体参数（均为可选）：
+  - `source_id`（string）：限定只运行某一源；不传则对所有源各执行一轮。
+  - `max_per_source`（number）：单次每源最多消费的队列作业数，默认 20。
+  - `time_budget_ms`（number）：本次运行的时间预算（毫秒），默认 5000。
+- 请求体（可选）：
+```json
+{
+  "source_id": "weather",
+  "keys": ["/weather/Shanghai", "/weather/Beijing"],
+  "max_per_source": 20,
+  "time_budget_ms": 5000
+}
+```
+  - 当同时提供 `source_id` 与 `keys` 且该源队列当前为空时，将先把这些 `keys` 入队，再立刻调用共享运行器消费（保持与预取一致的队列语义）。
+  - 若队列不为空，则跳过入队，直接运行消费。
+- 响应 200（示例）：
+```json
+{
+  "ok": true,
+  "processed_sources": 1,
+  "per_source": {
+    "weather": { "dequeued": 2, "updated": 1, "not_modified": 1, "errors": 0 }
+  },
+  "duration_ms": 1234,
+  "endpoint": "tasks-run",
+  "source_id": "weather",
+  "prefetch": { "enqueued": 2, "duplicates": 0, "idempotent_rejects": 0, "task_ids": ["t_1", "t_2"] },
+  "debug": {
+    "queue_len_before": 0,
+    "queue_len_after_enqueue": 2,
+    "queue_len_after_run": 0,
+    "run_opts": { "source_id": "weather", "maxPerSource": 20, "timeBudgetMs": 5000 }
+  }
+}
+```
+  - 说明：`prefetch` 仅在符合“队列为空且提供 keys”时返回；`debug.run_opts` 字段名与实现一致（驼峰命名）。
 
 ### GET /api/v1/tasks/status/{task_id}
 - 描述：查询任务状态。
