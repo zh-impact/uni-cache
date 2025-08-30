@@ -144,7 +144,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
     : ((await sql/*sql*/`SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s FROM sources ORDER BY id`) as unknown as SourceRow[]);
 
   const perSource: Record<string, { dequeued: number; updated: number; not_modified: number; errors: number }> = {};
-
+  console.log('sources:', sources);
   for (const src of sources) {
     perSource[src.id] = { dequeued: 0, updated: 0, not_modified: 0, errors: 0 };
     const qkey = redisQueueKey(src.id);
@@ -161,6 +161,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       perSource[src.id].dequeued++;
 
       let job: RefreshJob | null = null;
+      console.log('popping job:', raw);
       try {
         job = JSON.parse(raw) as RefreshJob;
       } catch (e) {
