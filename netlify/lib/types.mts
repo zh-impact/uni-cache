@@ -29,6 +29,7 @@ export interface RefreshJob {
   source_id: string;
   key: string; // 规范化后的 key
   priority?: JobPriority;
+  attempts?: number; // 已尝试的次数（用于消费者重试上限控制）
   enqueued_at?: string; // ISO time
 }
 

@@ -52,6 +52,7 @@ export async function enqueueRefresh(job: RefreshJob, opts: EnqueueOptions = {})
     source_id,
     key: normalizedKey,
     priority: job.priority ?? 'normal',
+    attempts: 0,
     enqueued_at: new Date().toISOString(),
   };
   await redis.rpush(qkey, JSON.stringify(record));

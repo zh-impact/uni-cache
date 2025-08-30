@@ -25,4 +25,7 @@
 
 [context.dev]
   environment = "development"
-  variables = { DATABASE_URL = "postgresql://neondb_owner:npg_7KzLnc8gAvTs@ep-delicate-art-a1fnfk78-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require" }
+  [context.dev.variables]
+    DATABASE_URL = "postgresql://neondb_owner:npg_7KzLnc8gAvTs@ep-delicate-art-a1fnfk78-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+    UPSTASH_REDIS_REST_URL="https://full-kingfish-50270.upstash.io"
+    UPSTASH_REDIS_REST_TOKEN="AcReAAIncDE3N2M3ZDJlZmNkN2U0MWNjODEyZmI3YmNiZjFhNDk2M3AxNTAyNzA"
