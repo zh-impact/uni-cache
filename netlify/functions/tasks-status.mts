@@ -15,5 +15,5 @@ export default async (req: Request, context: Context) => {
 };
 
 export const config: Config = {
-  path: "/api/v1/tasks/:task_id",
+  path: "/api/v1/tasks/status/:task_id",
 };

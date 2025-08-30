@@ -195,7 +195,7 @@
 - 查询：`source_id`（可选，不传则对所有源按配置的计划执行一轮）。
 - 响应 202：`{"task_id": "t_run_001"}`
 
-### GET /api/v1/tasks/{task_id}
+### GET /api/v1/tasks/status/{task_id}
 - 描述：查询任务状态。
 - 响应 200：
 ```json
