@@ -11,10 +11,16 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "@netlify/functions": "^4.2.4"
+    "@neondatabase/serverless": "^1.0.1",
+    "@netlify/functions": "^4.2.4",
+    "zod": "^4.1.5"
   },
   "devDependencies": {
     "@tsconfig/recommended": "^1.0.10"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "singleQuote": true
   },
   "packageManager": "pnpm@9.15.0+sha512.76e2379760a4328ec4415815bcd6628dee727af3779aaa4c914e3944156c4299921a89f976381ee107d41f12cfa4b66681ca9c718f0668fa0831ed4c6d8ba56c"
 }

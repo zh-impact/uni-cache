@@ -22,3 +22,7 @@
 
 [dev]
   autoLaunch = false
+
+[context.dev]
+  environment = "development"
+  variables = { DATABASE_URL = "postgresql://neondb_owner:npg_7KzLnc8gAvTs@ep-delicate-art-a1fnfk78-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require" }
