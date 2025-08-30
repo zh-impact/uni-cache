@@ -159,7 +159,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
     for (let i = 0; i < maxPerSource; i++) {
       if (Date.now() - started > timeBudgetMs) break; // 时间预算兜底
 
-      const raw = await redis.lpop<string>(qkey);
+      const raw = (await redis.lpop(qkey)) as unknown;
       if (!raw) {
         console.log('queue empty', { source_id: src.id, i, dequeued: perSource[src.id].dequeued });
         break; // 队列空
@@ -167,11 +167,18 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       perSource[src.id].dequeued++;
 
       let job: RefreshJob | null = null;
-      console.log('popping job:', raw);
       try {
-        job = JSON.parse(raw) as RefreshJob;
+        if (typeof raw === 'string') {
+          job = JSON.parse(raw) as RefreshJob;
+          console.log('popping job (string):', job);
+        } else if (raw && typeof raw === 'object') {
+          job = raw as RefreshJob;
+          console.log('popping job (object):', job);
+        } else {
+          throw new Error(`unexpected job type: ${typeof raw}`);
+        }
       } catch (e) {
-        console.warn('invalid job payload, dropped:', e);
+        console.warn('invalid job payload, dropped:', { err: String(e), raw_type: typeof raw, raw });
         continue;
       }
       if (!job?.key) continue;
@@ -179,7 +186,8 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       // 限速（简单固定窗）：仅在取到作业后扣额度；若不允许，放回队尾并停止当前源
       const rl = await acquire(src.id, { per_minute: perMinute, burst });
       if (!rl.allowed) {
-        await redis.rpush(qkey, raw);
+        // 统一回推标准化 JSON，避免将对象直接入队导致后续 JSON.parse 失败
+        await redis.rpush(qkey, JSON.stringify(job));
         console.log('rate limit deny', { source_id: src.id, rl });
         break;
       }
