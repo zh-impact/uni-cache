@@ -5,6 +5,7 @@
   "keywords": [],
   "author": "Zead",
   "license": "MIT",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "build": "echo \"Building...\"",

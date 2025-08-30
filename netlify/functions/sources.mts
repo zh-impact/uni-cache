@@ -1,5 +1,5 @@
 import type { Config, Context } from '@netlify/functions';
-import { sql } from '../lib/db.mts';
+import { sql } from '../lib/db.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
