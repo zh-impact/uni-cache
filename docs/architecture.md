@@ -195,6 +195,47 @@ CREATE TABLE jobs (
 - 追踪：可接入 Sentry/OTel（按需）；
 - 报警：队列堆积、任务失败率、命中率显著下降。
 
+### SLO 对齐与实现建议（对应 `docs/requirements.md` Success Metrics）
+- 可用性 ≥ 99.9%
+  - 策略：健康检查独立；读路径优先返回 STALE；管理面与数据面隔离。
+  - 指标与 SLI：`reads_total`、`read_errors_total`，`SLI = 1 - read_errors_total/reads_total`。
+  - 报警：月度滑窗 < 99.9% 告警。
+- 延迟（HIT）P99 ≤ 100ms
+  - 策略：命中路径仅走 Redis；避免同步直连上游；减少冷启动开销（热键预热/连接复用）。
+  - 指标：直方图 `read_latency_ms{result="HIT"}`；报警：5 分钟窗 p99 > 100ms。
+- MISS 应答 P99 ≤ 200ms（返回 202 或 STALE）
+  - 策略：未命中默认异步刷新并快速返回；直连上游需显式 hint 且受配额约束。
+  - 指标：直方图 `miss_ack_latency_ms`；报警：p99 > 200ms。
+- Stale‑if‑error 覆盖率 ≥ 95%
+  - 策略：上游错误且存在最后一次成功值 → 返回 STALE 并入队刷新。
+  - 指标：`stale_if_error_served_total / stale_if_error_opportunities_total`；低于阈值报警。
+- 热键命中率（warmed keys）≥ 80%
+  - 策略：维护“预热集合”并由调度器周期预取；对相关读写加标签 `warmed="true"`。
+  - 指标：`cache_hit_total{warmed="true"} / (cache_hit_total{warmed} + cache_miss_total{warmed})`；低于阈值报警。
+- 失效正确性：失效后错误服务率 ≤ 0.1%
+  - 策略：删除/失效双写一致（Redis+Postgres）；幂等保护与写后验证采样。
+  - 指标：`post_invalidate_served_total / post_invalidate_reads_total`；超阈值报警。
+- 可观测性覆盖率 100%
+  - 要求：所有端点输出结构化日志与统一响应头：`X-UC-Trace-Id`、`X-UC-Served-From`、`X-UC-Origin-Status`、`X-UC-Source-Id`。
+
+### 指标命名与标签建议
+- 计数器（Counter）
+  - `cache_hit_total{source_id}`、`cache_miss_total{source_id}`、`cache_stale_served_total{reason="expire|error"}`
+  - `reads_total{result="HIT|MISS|STALE|BYPASS"}`、`read_errors_total{type}`
+  - `upstream_requests_total{source_id,status}`、`rate_limit_acquire_total{result="ok|limited"}`
+  - `post_invalidate_served_total`、`stale_if_error_served_total`、`stale_if_error_opportunities_total`
+- 直方图（Histogram）
+  - `read_latency_ms{result}`、`miss_ack_latency_ms`、`upstream_latency_ms{status}`
+- 仪表（Gauge）
+  - `jobs_queued{source_id}`、`jobs_running{source_id}`、`jobs_failed{source_id}`、`queue_lag_ms{source_id}`
+
+### 仪表盘与报警建议
+- 延迟：`read_latency_ms{result="HIT"}` p99 趋势；`miss_ack_latency_ms` p99 趋势。
+- 可用性：`1 - read_errors_total/reads_total`；分源下钻。
+- 覆盖率：Stale‑if‑error 覆盖与 warmed keys 命中率。
+- 资源：队列深度、失败率、限速余量与 429 次数。
+- 异常：`post_invalidate_served_total` 非零告警。
+
 ---
 
 ## 9. 部署与 CI/CD

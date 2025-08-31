@@ -31,6 +31,10 @@
 - `ETag: <etag>`：缓存内容标签，配合 `If-None-Match` 支持 304。
 - `Cache-Control`：对下游客户端的建议缓存策略（不替代服务端缓存）。
 - 限速头（针对本服务对上游的配额，而非下游客户端）：`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`。
+- `X-UC-Trace-Id: <id>`：请求级唯一标识（与错误响应 `request_id` 对应）。
+- `X-UC-Served-From: redis | postgres | upstream | stale | memory`：本次响应来源。
+- `X-UC-Origin-Status: <int>`：最近一次上游抓取的 HTTP 状态码（可选）。
+- `X-UC-Source-Id: <source_id>`：当前命中的源标识。
 
 ## 数据模型（抽象）
 - Source（数据源）：
@@ -125,7 +129,9 @@
     "expires_at": "2025-08-29T16:10:00Z",
     "stale": false,
     "etag": "W/\"1a2b3c\"",
-    "origin_status": 200
+    "origin_status": 200,
+    "served_from": "redis",
+    "trace_id": "req_123"
   }
 }
 ```
@@ -255,6 +261,26 @@
 ```
 
 ---
+
+## 统一错误响应模型
+- 描述：所有非 2xx/3xx 响应应遵循统一错误结构，便于客户端与观测系统消费。
+- 关联：`request_id` 与响应头 `X-UC-Trace-Id` 对应。
+- 结构（示例）：
+```json
+{
+  "code": "invalid_argument",
+  "message": "missing required field: source_id",
+  "request_id": "req_123",
+  "details": {"field": "source_id"},
+  "hint": "provide a non-empty source_id"
+}
+```
+- 说明：
+  - `code`：机器可读错误码（snake_case）。
+  - `message`：人类可读描述（英文）。
+  - `request_id`：与 `X-UC-Trace-Id` 相同值。
+  - `details`：可选，结构化上下文（对象或数组）。
+  - `hint`：可选，修复建议。
 
 ## 错误码
 - 400：请求参数错误
