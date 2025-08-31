@@ -88,14 +88,61 @@ Uni-Cache provides a stable, unthrottled facade over third‑party APIs by decou
 - Advanced UI/UX beyond the minimal admin endpoints.
 - Provider‑specific technologies, environment variables, and deployment details.
 
-### Stable resource, dynamic representation
+### Glossary
 
-Weather API, e.g., `/weather/Shanghai`: stable URL, frequently changing data.
+- Source: A named upstream API configuration with default request parameters, cache policy (e.g., TTL), and rate‑limit policy.
+- Key: Deterministic identifier for a cached item within a Source; derived from request semantics (path + parameters) and unique per item.
+- Cache Entry: A value and its metadata stored for a given Source and Key; metadata includes freshness indicators and timestamps.
+- Fresh/HIT: Entry served within its freshness window. MISS: Entry not present. STALE: Entry expired but still eligible to be served under policy.
+- Refresh: Fetching from the upstream to populate or update a cache entry; may be triggered by MISS/STALE/manual/schedule.
+- Prefetch: Proactively refreshing a set of keys before anticipated demand.
+- Invalidate: Removing an entry so the next read behaves as MISS until repopulated.
+- TTL (Time‑to‑Live): Duration after which an entry is considered expired.
+- SLO: Target objectives for performance and availability defined by this document.
+- Admin Operation: Privileged actions such as managing sources or cache control operations (refresh/prefetch/invalidate).
+- Client Hints: Optional request signals that influence behavior (e.g., cache‑only, bypass cache, short wait), subject to policy.
 
-### Stable resource, static representation
+### Success Metrics
 
-Configuration API, e.g., `/config`: stable URL, static data.
+- Availability (reads): ≥ 99.9% monthly success rate for read operations (excludes admin endpoints).
+- Latency (HIT): P99 ≤ 100 ms for successful cache HIT responses.
+- MISS time‑to‑ack: P99 ≤ 200 ms to return either an acceptance (asynchronous) or a stale response when a stale value exists.
+- Stale‑if‑error coverage: During upstream outage windows, ≥ 95% of reads to keys with a last known good value return STALE instead of hard errors.
+- Hit ratio (warmed keys): ≥ 80% HIT ratio across defined warmed key sets over a rolling 24‑hour window.
+- Invalidation correctness: After invalidation, probability of serving the invalidated value ≤ 0.1% across subsequent reads.
+- Observability coverage: 100% of endpoints emit structured logs and basic metrics for requests and outcomes.
 
-### Query/computed resource
+### Risks & Mitigations
 
-Search API, e.g., `/search?q=Shanghai`: varying URL (parameterized), changing data.
+- Upstream rate limits exhausted
+  - Mitigation: Enforce bounded refresh concurrency and rate‑limit policies; degrade to STALE or defer until next window.
+- Thundering herd on hot‑key MISS
+  - Mitigation: Coalesce duplicate refreshes, ensure idempotency, and single‑flight semantics for the same key.
+- Data staleness drift
+  - Mitigation: Clear TTL policies, prefetch for hot sets, manual refresh controls, and visibility via metrics.
+- Partial service outages (e.g., background processing unavailable)
+  - Mitigation: Degrade reads to STALE when possible, apply backpressure, and surface clear error responses when no data is available.
+- Incorrect key canonicalization causing duplicates or misses
+  - Mitigation: Strict key templates, input validation, and test coverage for key construction.
+- Security exposure through misuse of control operations
+  - Mitigation: Authenticate/authorize admin operations, principle of least privilege, and auditability of changes.
+- Bypass/force‑refresh abuse increasing upstream pressure
+  - Mitigation: Guardrails and quotas for optional client hints; restrict sensitive operations to admins.
+- Cost growth due to unbounded retention or prefetch
+  - Mitigation: Tune TTLs, define GC/archival policies, and limit prefetch scope based on measured value.
+- Multi‑tenant isolation requirements (future)
+  - Mitigation: Out of scope for this phase; plan for tenant‑aware keys/policies in a future iteration.
+
+### Appendix: Resource Types
+
+- Stable resource, dynamic representation
+  - Definition: Stable URI; data changes frequently.
+  - Example: Weather API, e.g., `/weather/Shanghai`.
+
+- Stable resource, static representation
+  - Definition: Stable URI; data is static.
+  - Example: Configuration API, e.g., `/config`.
+
+- Query/computed resource
+  - Definition: Parameterized or computed endpoint; data changes with inputs and time.
+  - Example: Search API, e.g., `/search?q=Shanghai`.
