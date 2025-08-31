@@ -1,3 +1,3 @@
-# A Unified Cache System (Created by Zead with Vibe Coding)
+# Uni-Cache (Created by Zead with Vibe Coding)
 
-A Cache Service for Third-Party API.
+A unthrottled API system with transparent caching facade over third‑party APIs.
