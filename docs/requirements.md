@@ -1,4 +1,4 @@
-# A Unified Cache System, but more prefer call it a Unthrottled API System
+# Product Requirements: Uni-Cache, unthrottled API system
 
 ## Core Requirements
 
@@ -6,99 +6,87 @@
 
 Uni-Cache provides a stable, unthrottled facade over third‑party APIs by decoupling end‑user reads from upstream fetches via caching and background refresh. Clients read from Uni‑Cache; Uni‑Cache fetches from the upstream within each source’s rate limit and refresh policies.
 
-Reference API contract: see `docs/api.md` (v1 endpoints under `/api/v1`).
+### Goals
 
-### Functional Requirements
+- Provide a transparent caching facade for third‑party APIs to decouple client traffic from upstream rate limits and instability.
+- Deliver predictable, low‑latency responses for hot data.
+- Minimize integration effort: simple and consistent HTTP API, clear semantics.
+- Enable administrators to manage sources, refresh/invalidate entries, and observe system health.
 
-1) Source management
-- CRUD for Source objects: `id`, `name`, `base_url`, `default_headers` (object), `default_query` (object), `rate_limit` ({ per_minute, burst? }), `cache_ttl_s` (default TTL), `key_template`.
-- Validation: `id` is required and unique; numeric fields are finite; objects must be JSON.
-- Idempotency for create/update via `Idempotency-Key` (recommendation); errors: 400/409/401/403 as appropriate.
-- HTTP endpoints: `/api/v1/sources` and `/api/v1/sources/:source_id`.
+### Non‑Goals
 
-2) Cache read paths
-- Single read: `GET /api/v1/cache/{source_id}/{key}` returns `{data, meta}` on HIT; supports `If-None-Match` → 304.
-- Batch read: `POST /api/v1/cache/{source_id}/batch-get` with `keys: string[]`.
-- List keys by prefix: `GET /api/v1/cache/{source_id}/list?prefix&cursor&limit`.
-- Metadata only: `GET /api/v1/cache/{source_id}/{key}/meta`.
-- Response headers: `X-UC-Cache (HIT|MISS|STALE|BYPASS)`, `X-UC-Age`, `ETag`, `Cache-Control`.
+- Strong consistency across all reads (eventual consistency with bounded staleness is acceptable).
+- Advanced admin UI, billing, quotas, or multi‑tenant isolation in this phase.
+- Provider‑specific behavior or infrastructure details in this document.
 
-3) Refresh/Prefetch/Invalidate triggers
-- Read MISS/STALE queues a refresh (respect per‑source rate limits).
-- Manual refresh: `POST /api/v1/cache/{source_id}/{key}/refresh` → 200 (sync) or 202 (queued) with `task_id`.
-- Batch prefetch: `POST /api/v1/cache/{source_id}/prefetch` with `keys` → 202; deduplicate by key + source.
-- Invalidate: `POST /api/v1/cache/{source_id}/{key}/invalidate` → 204.
-- Request headers:
-  - `X-UC-Bypass-Cache: true` → try direct upstream (within limits) and update cache; fallback to cache if cannot.
-  - `X-UC-Cache-Only: true` → serve from cache only, never touch upstream.
-  - `X-UC-Wait: 1` → best‑effort synchronous wait for the triggered refresh with timeout; else 202.
-  - `Idempotency-Key` for write‑like operations (refresh/prefetch/invalidate).
+### Personas & Use Cases
 
-4) Storage model and semantics
-- Primary cache: Upstash Redis. Keys are normalized; value is a `CacheEntry` with `meta`.
-- Persistence: Neon Postgres stores long‑term `cache_entries` (write‑through by default, configurable per write).
-- Read‑through: on Redis miss, read from Postgres; if found, backfill Redis with the remaining TTL derived from `expires_at` (if expired, backfill with short TTL, e.g., 60s) per `netlify/lib/cache.mts`.
-- Delete removes from both Redis and Postgres.
-- Metadata fields include: `etag`, `last_modified`, `origin_status`, `content_type`, `data_encoding` (default `json`), `cached_at`, `expires_at`, `ttl_s`, `stale`.
+- Personas
+  - Backend service developers integrating with rate‑limited or unstable third‑party APIs.
+  - Platform/operations engineers who operate and monitor the service.
+- Representative use cases
+  1) Serve data quickly under strict upstream rate limits.
+  2) Return the last known good value during an upstream outage while background refresh proceeds.
+  3) Pre‑warm a batch of keys ahead of a traffic spike.
+  4) Manually refresh a specific key after a known upstream change.
+  5) Invalidate incorrect or outdated entries.
+  6) Observe health and basic metrics.
 
-5) Rate limiting, queuing, and task runner
-- Per‑source queues with deduplication and idempotency.
-- Execution respects each source’s `rate_limit.per_minute` and optional `burst`.
-- A shared runner `runOnce(opts)` consumes per‑source queues with retries/backoff and updates cache.
-- On‑demand run: `POST /api/v1/tasks/run` with optional `source_id`, `max_per_source`, `time_budget_ms`, and optional `keys` (when queue empty, enqueue then immediately consume).
-- Scheduled run: Netlify Scheduled Functions invoke the runner periodically (default cron `*/5 * * * *`), overridable by env.
+### Functional Requirements (What)
 
-6) Consistency & freshness
-- `stale-while-revalidate`: serve stale briefly while refreshing in background.
-- `stale-if-error`: on upstream failure, serve last good value within an acceptable window.
-- ETag/If-None-Match support to minimize upstream cost.
-
-7) Observability and metrics
-- `GET /api/v1/metrics` provides basic runtime metrics (uptime, cache hits/misses, queue sizes, failures).
-- Expose per‑request headers (`X-UC-*`) and structured logs for queue consumption and refresh results.
-- Optional `GET /api/v1/tasks/status/{task_id}` to track queued/running/succeeded/failed.
-
-8) Security & administration
-- Authentication: `Authorization: Bearer <token>` or `X-API-Key: <token>`.
-- Source and task management endpoints restricted to admins.
-- Secrets (upstream tokens) stored server‑side; not exposed to clients. CORS allowlist configurable per deployment.
-
-9) Management UI (Phase 2)
-- View/create/update/delete Sources.
-- Browse CacheEntries (list/filter by prefix, view meta/data), invalidate, trigger refresh/prefetch.
+- Source management
+  - Create, update, delete, and list sources with identifiers, default request parameters, default cache policy (e.g., TTL), and rate‑limit policy.
+  - Validate inputs and reject malformed or conflicting configurations.
+- Cache reads
+  - Retrieve a single entry by source and key; return payload and metadata indicating freshness (HIT/MISS/STALE).
+  - Batch read multiple keys; list keys by prefix with pagination; fetch metadata without payload when requested.
+  - Support optional client hints to read from cache only or to bypass cache; define fallback behavior when hints cannot be honored.
+- Refresh & prefetch
+  - On MISS or STALE, enqueue a background refresh according to source policy.
+  - Manually refresh a specific key; batch prefetch a list of keys.
+  - Provide an option to wait briefly for completion with a bounded timeout; otherwise acknowledge asynchronously.
+  - Deduplicate concurrent refreshes and ensure idempotent invocation.
+- Invalidate
+  - Remove an entry by source and key; subsequent reads behave as MISS until repopulated.
+- Health & metrics
+  - Expose basic health and service info; provide aggregated metrics such as hit/miss rates and failures.
 
 ### Non‑Functional Requirements
 
-- Performance: P99 ≤ 100ms for cache HIT responses; MISS should return promptly with 202 or serve stale within 200ms when available.
-- Availability: Degrade gracefully if Redis is unavailable by falling back to Postgres (read‑through); if both fail, return 5xx with clear error model.
-- Scalability: Support many sources and high QPS reads; queue and runner must protect upstreams via rate limits and backoff.
-- Reliability: Idempotent queueing; deduplicate same key refreshes; retry with bounded backoff; at‑least‑once refresh semantics.
-- Data retention: Redis TTL enforced by `ttl_s`; Postgres keeps historical entries as the source of truth; GC policies can be added later.
-- Security: Do not log sensitive headers; enforce admin auth on management endpoints.
+- Performance: P99 ≤ 100ms for cache HIT; MISS should return promptly or serve stale within 200ms when available.
+- Availability: Degrade gracefully when upstream or internal components are unavailable; return clear error responses when no data can be served.
+- Scalability: Support many sources and high QPS reads; protect upstreams via rate limiting and backoff.
+- Reliability: Idempotent operations; deduplicate refreshes; bounded retries; eventual consistency.
+- Data retention: Honor TTL policies; long‑term persistence and GC policies are implementation‑defined.
+- Security: Authenticate admin operations; avoid logging sensitive data; CORS allowlist.
 
-### Configuration & Environment
+### Constraints & Assumptions
 
-- Platform: Netlify Functions + Netlify Scheduled Functions.
-- Runtime: Node 18+, TypeScript.
-- Environment variables:
-  - Upstash Redis: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
-  - Postgres (Neon): `DATABASE_URL`.
-  - Scheduled runner overrides: `SCHEDULED_REFRESH_SOURCE_ID`, `SCHEDULED_REFRESH_MAX_PER_SOURCE`, `SCHEDULED_REFRESH_TIME_BUDGET_MS`.
+- Stateless compute; background work may run asynchronously and complete later than the triggering request.
+- Upstream APIs enforce rate limits and may experience intermittent failures.
+- Stale reads within policy are acceptable to prioritize availability and latency.
+- Single‑tenant deployment assumptions for this phase.
+
+### Dependencies & Interfaces
+
+- Public HTTP API.
+- Requires persistent storage and caching, a background processing mechanism, and a scheduling capability.
+- Auth mechanism for admin operations.
 
 ### Acceptance Criteria
 
-- After creating a Source, `GET /api/v1/cache/{source_id}/{key}` returns HIT when populated, MISS otherwise with refresh queued; `X-UC-Cache` reflects state.
-- On Redis miss with existing Postgres entry, service returns the entry and backfills Redis with remaining TTL.
-- `POST /api/v1/cache/{source_id}/{key}/refresh` returns 200 when completed synchronously, or 202 with `task_id` when queued.
-- `POST /api/v1/cache/{source_id}/prefetch` enqueues unique keys and returns 202.
-- `POST /api/v1/tasks/run` consumes queues honoring `max_per_source` and `time_budget_ms` and returns a summary as in `docs/api.md`.
-- `GET /api/v1/metrics` exposes basic counters; error responses follow the error model in `docs/api.md`.
+- Source lifecycle: valid sources can be created, updated, listed, and deleted; invalid input yields explicit 4xx errors.
+- Reads: when data is available and fresh, responses meet the performance SLO; on MISS, a refresh is queued; if a stale value exists, it can be returned according to policy.
+- Refresh & prefetch: on‑demand refresh and batch prefetch requests are accepted once per key (idempotent); optional short wait completes within a bounded timeout.
+- Invalidate: after invalidation, the next read behaves as MISS until data is repopulated.
+- Health & metrics: health reports service readiness; basic metrics expose hits, misses, stale serves, and failures.
 
 ### Out of Scope (for this phase)
 
 - Multi‑tenant RBAC, per‑user quotas, or billing.
 - Streaming responses and websockets.
 - Advanced UI/UX beyond the minimal admin endpoints.
+- Provider‑specific technologies, environment variables, and deployment details.
 
 ### Stable resource, dynamic representation
 
