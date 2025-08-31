@@ -2,6 +2,7 @@
 import { redis } from './redis.mjs';
 import { keyHash, normalizeKeyString, redisKeyCache } from './key.mjs';
 import type { CacheEntry, CacheMeta } from './types.mjs';
+import { pgGetCacheEntry, pgSetCacheEntry, pgDelCacheEntry } from './cache-pg.mjs';
 
 function nowISO(): string {
   return new Date().toISOString();
@@ -16,11 +17,21 @@ export async function getCacheEntry<T = unknown>(source_id: string, key: string)
   const normalized = normalizeKeyString(key);
   const k = redisKeyCache(source_id, keyHash(normalized));
   const val = await redis.get<CacheEntry<T>>(k);
-  return val ?? null;
+  if (val) return val;
+  // Redis 未命中 → 尝试从 Postgres 读取并回填 Redis
+  const fromPg = await pgGetCacheEntry<T>(source_id, key);
+  if (!fromPg) return null;
+  // 计算剩余 TTL；若已过期则回填一个短 TTL，避免频繁读 PG
+  const ttl = ttlFromExpiresAt(fromPg.meta?.expires_at);
+  try {
+    await setCacheEntry<T>(source_id, key, fromPg, { ttl_s: ttl, persistToPg: false });
+  } catch {}
+  return fromPg;
 }
 
 export interface SetCacheEntryOptions {
   ttl_s?: number; // 覆盖 TTL；默认写入 meta.ttl_s
+  persistToPg?: boolean; // 是否持久化到 Postgres，默认 true
 }
 
 export async function setCacheEntry<T = unknown>(
@@ -47,16 +58,29 @@ export async function setCacheEntry<T = unknown>(
   } else {
     await redis.set(k, copy);
   }
+  // 默认写入 Postgres（写透）；可通过 opts.persistToPg 关闭
+  const persist = opts.persistToPg !== false;
+  if (persist) {
+    await pgSetCacheEntry(source_id, key, copy);
+  }
 }
 
 export async function delCacheEntry(source_id: string, key: string): Promise<number> {
   const normalized = normalizeKeyString(key);
   const k = redisKeyCache(source_id, keyHash(normalized));
-  const n = await redis.del(k);
-  return Number(n ?? 0);
+  const [n, m] = await Promise.all([redis.del(k), pgDelCacheEntry(source_id, key)]);
+  return Number(n ?? 0) + Number(m ?? 0);
 }
 
 export function computeExpiresAt(ttl_s: number): string | null {
   if (!ttl_s || ttl_s <= 0) return null;
   return new Date(Date.now() + ttl_s * 1000).toISOString();
 }
+
+// 根据 expires_at 计算剩余 TTL；无过期则返回 0；若已过期回填一个短 TTL（60s）
+function ttlFromExpiresAt(expires_at?: string | null): number {
+  if (!expires_at) return 0;
+  const remain = Math.floor((Date.parse(expires_at) - Date.now()) / 1000);
+  return remain > 0 ? remain : 60;
+}
+
