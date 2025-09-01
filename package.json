@@ -11,7 +11,8 @@
     "start": "netlify dev",
     "build": "pnpm typecheck",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "orm": "drizzle-kit"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",
