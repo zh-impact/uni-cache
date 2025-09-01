@@ -6,16 +6,14 @@ import { redis } from '../lib/redis.mjs';
 import { redisQueueKey } from '../lib/key.mjs';
 import type { EnqueueResult } from '../lib/types.mjs';
 import { logger } from '../lib/logger.mjs';
+import { json } from '../lib/server.mjs';
 
+export const config: Config = {
+  path: '/api/v1/tasks/run',
+  method: 'POST',
+};
 
-function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
-  });
-}
-
-export async function POST(req: Request, _context: Context) {
+async function POST(req: Request, _context: Context) {
   const url = new URL(req.url);
   const qp = url.searchParams;
   const body = (await req.json().catch(() => ({} as any))) as any;
@@ -104,9 +102,4 @@ export async function POST(req: Request, _context: Context) {
 
 export default async (req: Request, _context: Context) => {
   return POST(req, _context);
-};
-
-export const config: Config = {
-  path: '/api/v1/tasks/run',
-  method: 'POST',
 };

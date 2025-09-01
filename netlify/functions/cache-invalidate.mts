@@ -1,11 +1,14 @@
 import type { Config, Context } from '@netlify/functions';
+
 import { delCacheEntry } from '../lib/cache.mjs';
+import { json } from '../lib/server.mjs';
 
-function json(_data: unknown, status = 204, headers: Record<string, string> = {}) {
-  return new Response(null, { status, headers });
-}
+export const config: Config = {
+  path: '/api/v1/cache/:source_id/:key/invalidate',
+  method: 'POST',
+};
 
-export async function POST(_req: Request, context: Context) {
+async function POST(_req: Request, context: Context) {
   const params = context.params || {};
   const source_id = params['source_id'] as string | undefined;
   const key = params['key'] as string | undefined;
@@ -21,9 +24,4 @@ export async function POST(_req: Request, context: Context) {
 
 export default async (req: Request, context: Context) => {
   return POST(req, context);
-};
-
-export const config: Config = {
-  path: '/api/v1/cache/:source_id/:key/invalidate',
-  method: 'POST',
 };

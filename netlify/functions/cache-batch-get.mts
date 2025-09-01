@@ -1,16 +1,16 @@
 import type { Config, Context } from '@netlify/functions';
+
+import type { CacheEntry } from '../lib/types.mjs';
 import { getCacheEntry, isStale } from '../lib/cache.mjs';
 import { enqueueRefresh } from '../lib/queue.mjs';
-import type { CacheEntry } from '../lib/types.mjs';
+import { json } from '../lib/server.mjs';
 
-function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
-  });
-}
+export const config: Config = {
+  path: '/api/v1/cache/:source_id/batch-get',
+  method: 'POST',
+};
 
-export async function POST(req: Request, context: Context) {
+async function POST(req: Request, context: Context) {
   let body: any = {};
   try {
     body = await req.json();
@@ -53,9 +53,4 @@ export async function POST(req: Request, context: Context) {
 
 export default async (req: Request, context: Context) => {
   return POST(req, context);
-};
-
-export const config: Config = {
-  path: '/api/v1/cache/:source_id/batch-get',
-  method: 'POST',
 };

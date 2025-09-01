@@ -1,14 +1,14 @@
 import type { Config, Context } from '@netlify/functions';
+
 import { acquire } from '../lib/rate-limit.mjs';
+import { json } from '../lib/server.mjs';
 
-function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
-  });
-}
+export const config: Config = {
+  path: '/api/v1/rate-limit/:source_id',
+  method: 'GET',
+};
 
-export async function GET(req: Request, context: Context) {
+async function GET(req: Request, context: Context) {
   const params = context.params || {};
   const source_id = (params['source_id'] as string) ?? undefined;
   if (!source_id) return json({ error: 'source_id is required' }, 422);
@@ -34,9 +34,4 @@ export async function GET(req: Request, context: Context) {
 
 export default async (req: Request, context: Context) => {
   return GET(req, context);
-};
-
-export const config: Config = {
-  path: '/api/v1/rate-limit/:source_id',
-  method: 'GET',
 };
