@@ -1,6 +1,7 @@
 import type { Config } from '@netlify/functions';
 import type { RunOptions } from '../lib/runner.mjs';
 import { runOnce } from '../lib/runner.mjs';
+import { logger } from '../lib/logger.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -20,7 +21,7 @@ export default async (req: Request) => {
   // Netlify Scheduled Functions 会传递 JSON 事件体（包含 next_run 等），未提供也不影响
   try {
     const evt = await req.json().catch(() => ({} as any));
-    if ((evt as any)?.next_run) console.log('scheduled-refresh next_run:', (evt as any).next_run);
+    if ((evt as any)?.next_run) logger.info({ event: 'scheduled-refresh.next_run', next_run: (evt as any).next_run });
   } catch {}
 
   const runOpts: RunOptions = {};
@@ -33,7 +34,7 @@ export default async (req: Request) => {
   if (typeof maxPerSource === 'number') runOpts.maxPerSource = maxPerSource;
   if (typeof timeBudgetMs === 'number') runOpts.timeBudgetMs = timeBudgetMs;
 
-  console.log('scheduled-refresh invoking runOnce with:', runOpts);
+  logger.info({ event: 'scheduled-refresh.invoke_runOnce', runOpts });
   const summary = await runOnce(runOpts);
   return json({ endpoint: 'scheduled-refresh', ...summary }, 200);
 };

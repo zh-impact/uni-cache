@@ -3,6 +3,7 @@ import { enqueueManyRefresh } from '../lib/queue.mjs';
 import { redis } from '../lib/redis.mjs';
 import { redisQueueKey } from '../lib/key.mjs';
 import { runOnce } from '../lib/runner.mjs';
+import { logger } from '../lib/logger.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -22,7 +23,7 @@ export default async (req: Request) => {
   // Netlify Scheduled Functions 传递的 JSON 事件体可忽略
   try {
     const evt = await req.json().catch(() => ({} as any));
-    if ((evt as any)?.next_run) console.log('scheduled-pool-fill next_run:', (evt as any).next_run);
+    if ((evt as any)?.next_run) logger.info({ event: 'scheduled-pool-fill.next_run', next_run: (evt as any).next_run });
   } catch {}
 
   const source_id = process.env.SCHEDULED_POOL_SOURCE_ID;
@@ -44,9 +45,9 @@ export default async (req: Request) => {
     const results = await enqueueManyRefresh(keys.map((k) => ({ source_id, key: k })), { dedupeTtlS: 10 });
     const enqueued = results.filter((r) => r.enqueued).length;
     enqResult = { enqueued, keys };
-    console.log('scheduled-pool-fill prefetch', { source_id, enqueued, keys_count: keys.length });
+    logger.info({ event: 'scheduled-pool-fill.prefetch', source_id, enqueued, keys_count: keys.length });
   } else {
-    console.log('scheduled-pool-fill skip prefetch: queue not empty or prefetch=0', { source_id, qlen, prefetch });
+    logger.info({ event: 'scheduled-pool-fill.skip_prefetch', reason: 'queue_not_empty_or_prefetch_zero', source_id, qlen, prefetch });
   }
 
   // 立即消费一轮（时间预算小）

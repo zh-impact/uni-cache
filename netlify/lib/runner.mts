@@ -7,6 +7,7 @@ import { getCacheEntry, setCacheEntry, computeExpiresAt } from './cache.mjs';
 import type { CacheDataEncoding, CacheEntry, RefreshJob } from './types.mjs';
 import { poolAddItem } from './pool.mjs';
 import { ensurePoolTable } from './pool-pg.mjs';
+import { logger } from './logger.mjs';
 
 const DEFAULT_MAX_PER_SOURCE = 20; // 每源单次最多处理作业数
 const DEFAULT_TIME_BUDGET_MS = 5_000; // 即时执行时间预算（毫秒）
@@ -140,19 +141,19 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
   const started = Date.now();
   const maxPerSource = Math.max(1, Math.floor(opts.maxPerSource ?? DEFAULT_MAX_PER_SOURCE));
   const timeBudgetMs = Math.max(500, Math.floor(opts.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS));
-  console.log('runOnce start', { source_id: opts.source_id ?? null, maxPerSource, timeBudgetMs });
+  logger.info({ event: 'runner.start', source_id: opts.source_id ?? null, maxPerSource, timeBudgetMs });
 
   const sources: SourceRow[] = opts.source_id
     ? ((await sql/*sql*/`SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s FROM sources WHERE id = ${opts.source_id} ORDER BY id`) as unknown as SourceRow[])
     : ((await sql/*sql*/`SELECT id, base_url, default_headers, default_query, rate_limit, cache_ttl_s FROM sources ORDER BY id`) as unknown as SourceRow[]);
 
   const perSource: Record<string, { dequeued: number; updated: number; not_modified: number; errors: number }> = {};
-  console.log('sources:', sources.map(s => s.id));
+  logger.info({ event: 'runner.sources', ids: sources.map((s) => s.id) });
   for (const src of sources) {
     perSource[src.id] = { dequeued: 0, updated: 0, not_modified: 0, errors: 0 };
     const qkey = redisQueueKey(src.id);
     const initialLen = await redis.llen(qkey);
-    console.log('queue init', { source_id: src.id, queue_len: initialLen });
+    logger.info({ event: 'runner.queue_init', source_id: src.id, queue_len: initialLen });
 
     const rlCfg = parseMaybeObj<{ per_minute?: number; burst?: number }>(src.rate_limit);
     const perMinute = Math.max(0, rlCfg?.per_minute ?? 5);
@@ -163,7 +164,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
 
       const raw = (await redis.lpop(qkey)) as unknown;
       if (!raw) {
-        console.log('queue empty', { source_id: src.id, i, dequeued: perSource[src.id].dequeued });
+        logger.info({ event: 'runner.queue_empty', source_id: src.id, i, dequeued: perSource[src.id].dequeued });
         break; // 队列空
       }
       perSource[src.id].dequeued++;
@@ -172,15 +173,15 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       try {
         if (typeof raw === 'string') {
           job = JSON.parse(raw) as RefreshJob;
-          console.log('popping job (string):', job);
+          logger.info({ event: 'runner.job_popped', job_type: 'string', key: job.key, attempts: job.attempts ?? 0 });
         } else if (raw && typeof raw === 'object') {
           job = raw as RefreshJob;
-          console.log('popping job (object):', job);
+          logger.info({ event: 'runner.job_popped', job_type: 'object', key: job.key, attempts: job.attempts ?? 0 });
         } else {
           throw new Error(`unexpected job type: ${typeof raw}`);
         }
       } catch (e) {
-        console.warn('invalid job payload, dropped:', { err: String(e), raw_type: typeof raw, raw });
+        logger.warn({ event: 'runner.invalid_job_payload', err: String(e), raw_type: typeof raw, raw });
         continue;
       }
       if (!job?.key) continue;
@@ -190,7 +191,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       if (!rl.allowed) {
         // 统一回推标准化 JSON，避免将对象直接入队导致后续 JSON.parse 失败
         await redis.rpush(qkey, JSON.stringify(job));
-        console.log('rate limit deny', { source_id: src.id, rl });
+        logger.info({ event: 'runner.rate_limit_deny', source_id: src.id, rl });
         break;
       }
 
@@ -225,17 +226,17 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
                 const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
                 await redis.rpush(qkey, JSON.stringify(requeue));
               }
-              console.warn('requeue pool due to upstream', { source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
+              logger.warn({ event: 'runner.pool_requeue_upstream', source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
             }
             perSource[src.id].errors++;
-            console.warn('origin non-2xx (pool)', { source_id: src.id, key: job.key, status: res.status });
+            logger.warn({ event: 'runner.pool_origin_non_2xx', source_id: src.id, key: job.key, status: res.status });
             continue;
           }
 
           const { data, encoding, contentType } = await pickDataAndEncoding(res);
           await poolAddItem(src.id, pool_key, { data, encoding, content_type: contentType ?? null });
           perSource[src.id].updated++;
-          console.log('pool item added', { source_id: src.id, pool_key, status: res.status, content_type: contentType, encoding });
+          logger.info({ event: 'runner.pool_item_added', source_id: src.id, pool_key, status: res.status, content_type: contentType, encoding });
           continue;
         }
 
@@ -262,7 +263,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
           };
           await setCacheEntry(src.id, job.key, entry, { ttl_s });
           perSource[src.id].not_modified++;
-          console.log('not_modified; ttl extended', { source_id: src.id, key: job.key, ttl_s });
+          logger.info({ event: 'runner.not_modified_ttl_extended', source_id: src.id, key: job.key, ttl_s });
           continue;
         }
 
@@ -274,10 +275,10 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
               const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
               await redis.rpush(qkey, JSON.stringify(requeue));
             }
-            console.warn('requeue due to upstream', { source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
+            logger.warn({ event: 'runner.requeue_upstream', source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
           }
           perSource[src.id].errors++;
-          console.warn('origin non-2xx', { source_id: src.id, key: job.key, status: res.status });
+          logger.warn({ event: 'runner.origin_non_2xx', source_id: src.id, key: job.key, status: res.status });
           continue;
         }
 
@@ -303,7 +304,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         };
         await setCacheEntry(src.id, job.key, entry, { ttl_s });
         perSource[src.id].updated++;
-        console.log('cache updated', { source_id: src.id, key: job.key, status: res.status, ttl_s, content_type: contentType, encoding });
+        logger.info({ event: 'runner.cache_updated', source_id: src.id, key: job.key, status: res.status, ttl_s, content_type: contentType, encoding });
       } catch (e) {
         // 可能是网络错误/超时：按瞬态处理，回推队列（带 attempts 上限）
         try {
@@ -312,10 +313,10 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
             const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
             await redis.rpush(qkey, JSON.stringify(requeue));
           }
-          console.warn('requeue due to error', { source_id: src.id, key: job?.key, next_attempts: (job?.attempts ?? 0) + 1 });
+          logger.warn({ event: 'runner.requeue_error', source_id: src.id, key: job?.key, next_attempts: (job?.attempts ?? 0) + 1 });
         } catch {}
         perSource[src.id].errors++;
-        console.error('refresh error', { source_id: src.id, key: job?.key, err: String(e) });
+        logger.error({ event: 'runner.refresh_error', source_id: src.id, key: job?.key, err: String(e) });
       }
     }
   }

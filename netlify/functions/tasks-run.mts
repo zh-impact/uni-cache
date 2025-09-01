@@ -1,14 +1,12 @@
 import type { Config, Context } from '@netlify/functions';
-import { pino } from 'pino';
-import pretty from 'pino-pretty';
 
 import { runOnce } from '../lib/runner.mjs';
 import { enqueueManyRefresh } from '../lib/queue.mjs';
 import { redis } from '../lib/redis.mjs';
 import { redisQueueKey } from '../lib/key.mjs';
 import type { EnqueueResult } from '../lib/types.mjs';
+import { logger } from '../lib/logger.mjs';
 
-const logger = pino(pretty());
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
