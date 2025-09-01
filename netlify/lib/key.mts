@@ -65,3 +65,23 @@ export function redisKeyPoolIds(source_id: string, key_hash: string): string {
 export function redisKeyPoolItem(source_id: string, key_hash: string, item_id: string): string {
   return `uc:pool:item:${source_id}:${key_hash}:${item_id}`;
 }
+
+// 仅用于池模式：
+// - 解码并规范化路径
+// - 保留业务查询参数，但移除用于去重的临时参数 i（由调度/预取附加）
+// - 忽略片段（#...）
+export function sanitizePoolKey(raw: string): string {
+  try {
+    const normalized = normalizeKeyString(String(raw ?? ''));
+    // 使用虚拟基准解析，方便拆出 pathname 与 query
+    const u = new URL(normalized, 'http://uc.local');
+    // 移除用于去重的 nonce 参数
+    u.searchParams.delete('i');
+    const qs = u.searchParams.toString();
+    const path = u.pathname || '/';
+    return qs ? `${path}?${qs}` : path;
+  } catch {
+    // 兜底：至少保持规范的路径前缀
+    return normalizeKeyString(String(raw ?? ''));
+  }
+}

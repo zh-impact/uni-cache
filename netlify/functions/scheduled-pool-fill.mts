@@ -41,7 +41,9 @@ export default async (req: Request) => {
   let enqResult: null | { enqueued: number; keys: string[] } = null;
   if (qlen === 0 && prefetch > 0) {
     const now = Date.now();
-    const keys: string[] = Array.from({ length: prefetch }, (_v, i) => `/pool:${pool_key_raw}?i=${now}_${i}_${Math.random().toString(36).slice(2, 8)}`);
+    const hasQuery = String(pool_key_raw).includes('?');
+    const sep = hasQuery ? '&' : '?';
+    const keys: string[] = Array.from({ length: prefetch }, (_v, i) => `/pool:${pool_key_raw}${sep}i=${now}_${i}_${Math.random().toString(36).slice(2, 8)}`);
     const results = await enqueueManyRefresh(keys.map((k) => ({ source_id, key: k })), { dedupeTtlS: 10 });
     const enqueued = results.filter((r) => r.enqueued).length;
     enqResult = { enqueued, keys };

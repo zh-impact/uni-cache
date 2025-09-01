@@ -1,7 +1,7 @@
 // netlify/lib/runner.mts
 import { sql } from './db.mjs';
 import { redis } from './redis.mjs';
-import { redisQueueKey } from './key.mjs';
+import { redisQueueKey, sanitizePoolKey } from './key.mjs';
 import { acquire } from './rate-limit.mjs';
 import { getCacheEntry, setCacheEntry, computeExpiresAt } from './cache.mjs';
 import type { CacheDataEncoding, CacheEntry, RefreshJob } from './types.mjs';
@@ -201,22 +201,15 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         if (isPoolJob) {
           // 预创建表，避免首次任务未成功写入时表仍未创建的困惑
           try { await ensurePoolTable(); } catch {}
-          // 提取池 key（忽略 ?query，用于绕过去重的 nonce）
+          // 提取池 key，并去除仅用于去重的临时参数（保留业务查询参数）
           const after = job.key.slice('/pool:'.length);
           const poolWithQS = after.length > 0 ? after : '/';
-          const pool_key = poolWithQS.split('?')[0] || '/';
+          const pool_key = sanitizePoolKey(poolWithQS);
 
           const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
           // 对稳定端点不携带条件请求头
           const dq = parseMaybeObj<Record<string, any>>(src.default_query);
-          const u = new URL(src.base_url);
-          if (dq) {
-            for (const [k, v] of Object.entries(dq)) {
-              if (v == null) continue;
-              if (!u.searchParams.has(k)) u.searchParams.set(k, String(v));
-            }
-          }
-          const url = u.toString();
+          const url = buildURL(src.base_url, pool_key, dq);
           const res = await fetchWithRetry(url, { method: 'GET', headers }, { attempts: 2, baseDelayMs: 200, timeoutMs: 2500 });
 
           if (!res.ok) {

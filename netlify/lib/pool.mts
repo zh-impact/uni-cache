@@ -1,6 +1,6 @@
 // netlify/lib/pool.mts
 import { redis } from './redis.mjs';
-import { keyHash, normalizeKeyString, redisKeyPoolIds, redisKeyPoolItem } from './key.mjs';
+import { keyHash, normalizeKeyString, redisKeyPoolIds, redisKeyPoolItem, sanitizePoolKey } from './key.mjs';
 import { pgPoolAddItem, pgPoolGetItemById, pgPoolRandom } from './pool-pg.mjs';
 import type { CacheDataEncoding } from './types.mjs';
 import { createHash } from 'node:crypto';
@@ -24,7 +24,8 @@ export type PoolAddPayload = {
 };
 
 export async function poolAddItem(source_id: string, pool_key: string, payload: PoolAddPayload): Promise<{ item_id: string } | null> {
-  const normalized = normalizeKeyString(pool_key);
+  // 与 runner 使用相同的池键规范（保留业务查询参数，移除 nonce i）
+  const normalized = sanitizePoolKey(pool_key);
   const kh = keyHash(normalized);
 
   // 基于编码+内容计算稳定 item_id；json 直接 JSON.stringify（不稳定顺序可接受，首版简化）
@@ -64,7 +65,8 @@ export async function poolRandom(
   source_id: string,
   pool_key: string
 ): Promise<{ item_id: string; data: any; encoding: CacheDataEncoding; content_type: string | null; from: 'redis' | 'pg'; created_at?: string } | null> {
-  const normalized = normalizeKeyString(pool_key);
+  // 与 runner 使用相同的池键规范
+  const normalized = sanitizePoolKey(pool_key);
   const kh = keyHash(normalized);
   const idsKey = redisKeyPoolIds(source_id, kh);
 
