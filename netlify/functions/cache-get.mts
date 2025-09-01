@@ -44,7 +44,8 @@ export default async (req: Request, context: Context) => {
       // BYPASS: 后台补池（入队 /pool: 作业）
       if (bypass) {
         const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        enqueueRefresh({ source_id, key: `/pool:${key}?i=${encodeURIComponent(nonce)}` }).catch(() => {});
+        const sep = key.includes('?') ? '&' : '?';
+        enqueueRefresh({ source_id, key: `/pool:${key}${sep}i=${encodeURIComponent(nonce)}` }).catch(() => {});
       }
       return json(
         {
@@ -61,6 +62,26 @@ export default async (req: Request, context: Context) => {
         },
         200,
         headers
+      );
+    }
+  } catch {}
+
+  // 若 Source 开启了 pool 模式，则不回退到固定缓存。
+  // 动态导入，避免在无数据库配置的测试环境中抛错。
+  try {
+    const mod = await import('../lib/sources-pg.mjs');
+    const supportsPool = await mod.getSourceSupportsPool(source_id);
+    if (supportsPool) {
+      if (cacheOnly) {
+        return json({ error: 'Pool miss' }, 404, { 'X-UC-Cache': 'MISS', 'X-UC-Served-From': 'pool-none' });
+      }
+      const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const sep = key.includes('?') ? '&' : '?';
+      const r = await enqueueRefresh({ source_id, key: `/pool:${key}${sep}i=${encodeURIComponent(nonce)}` });
+      return json(
+        { ok: true, endpoint: 'cache-get', enqueued: r.enqueued, task_id: r.jobId, source_id, key, pool: true },
+        202,
+        { 'X-UC-Cache': 'MISS', 'X-UC-Served-From': 'pool-none', 'X-UC-Task-Id': r.jobId ?? '' }
       );
     }
   } catch {}

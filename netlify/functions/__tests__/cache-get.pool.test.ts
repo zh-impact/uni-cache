@@ -17,6 +17,12 @@ vi.mock('../../lib/cache.mjs', () => ({
   isStale: () => false,
 }));
 
+// Mock sources-pg to control supports_pool behavior for tests that need it
+const sourcesPgMock = {
+  getSourceSupportsPool: vi.fn(),
+};
+vi.mock('../../lib/sources-pg.mjs', () => sourcesPgMock);
+
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
@@ -96,5 +102,46 @@ describe('cache-get pool mode', () => {
     const arg = calls[calls.length - 1]?.[0];
     expect(arg?.source_id).toBe('quotes');
     expect(String(arg?.key)).toMatch(/^\/pool:\/quotes\?i=/);
+  });
+
+  it('enforces pool-only when source supports pool: 202 with task on miss', async () => {
+    // Pool miss
+    poolMock.poolRandom.mockResolvedValueOnce(null);
+    // supports_pool = true
+    sourcesPgMock.getSourceSupportsPool.mockResolvedValueOnce(true);
+    // enqueue to pool job
+    queueMock.enqueueRefresh.mockResolvedValueOnce({ enqueued: true, jobId: 't2' });
+
+    const mod = await import('../cache-get.mts');
+    const handler = mod.default as (req: Request, ctx: any) => Promise<Response>;
+
+    const req = new Request('https://example.com/api/v1/cache/quotes/%2Fquotes');
+    const ctx = { params: { source_id: 'quotes', key: '/quotes' } };
+
+    const res = await handler(req, ctx);
+    expect(res.status).toBe(202);
+    expect(res.headers.get('X-UC-Served-From')).toBe('pool-none');
+    const body = await res.json();
+    expect(body.pool).toBe(true);
+    expect(queueMock.enqueueRefresh).toHaveBeenCalled();
+    const arg = (queueMock.enqueueRefresh as any).mock.calls.pop()?.[0];
+    expect(String(arg?.key)).toMatch(/^\/pool:\/quotes\?i=|^\/pool:\/quotes&i=/);
+  });
+
+  it('returns 404 on cache-only when source supports pool and pool miss', async () => {
+    poolMock.poolRandom.mockResolvedValueOnce(null);
+    sourcesPgMock.getSourceSupportsPool.mockResolvedValueOnce(true);
+
+    const mod = await import('../cache-get.mts');
+    const handler = mod.default as (req: Request, ctx: any) => Promise<Response>;
+
+    const req = new Request('https://example.com/api/v1/cache/quotes/%2Fquotes', {
+      headers: { 'X-UC-Cache-Only': 'true' },
+    });
+    const ctx = { params: { source_id: 'quotes', key: '/quotes' } };
+
+    const res = await handler(req, ctx);
+    expect(res.status).toBe(404);
+    expect(res.headers.get('X-UC-Served-From')).toBe('pool-none');
   });
 });

@@ -1,5 +1,6 @@
 import type { Config, Context } from "@netlify/functions";
 import { sql } from '../lib/db.mjs';
+import { ensureSourcesSupportsPoolColumn } from '../lib/sources-pg.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -20,10 +21,13 @@ export default async (req: Request, context: Context) => {
 
   if (!source_id) return json({ error: "source_id is required" }, 400);
 
+  // 确保列存在（幂等）
+  await ensureSourcesSupportsPoolColumn().catch(() => {});
+
   if (method === "GET") {
     // 占位：返回一个示例或 404。这里默认返回示例。
     const item = await sql/*sql*/`
-      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
       FROM sources WHERE id = ${source_id}
     `;
     if (!item.length) return json({ error: "Source not found" }, 404);
@@ -44,9 +48,10 @@ export default async (req: Request, context: Context) => {
       rate_limit = ${JSON.stringify(body.rate_limit ?? { per_minute: 5 })}::jsonb,
       cache_ttl_s = ${body.cache_ttl_s ?? 600},
       key_template = ${body.key_template ?? '/'},
+      supports_pool = COALESCE(${body.supports_pool ?? null}, supports_pool),
       updated_at = now()
     WHERE id = ${source_id}
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
     `;
     return json(updated[0], 200);
   }
@@ -55,7 +60,7 @@ export default async (req: Request, context: Context) => {
     // 占位：标记删除成功
     const deleted = await sql/*sql*/`
     DELETE FROM sources WHERE id = ${source_id}
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
     `;
     return json(deleted[0], 204);
   }

@@ -1,5 +1,6 @@
 import type { Config, Context } from '@netlify/functions';
 import { sql } from '../lib/db.mjs';
+import { ensureSourcesSupportsPoolColumn } from '../lib/sources-pg.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -15,10 +16,12 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
 // - 鉴权：仅管理员可访问
 export default async (req: Request, _context: Context) => {
   const method = req.method.toUpperCase();
+  // 尝试确保 supports_pool 列存在（幂等）
+  await ensureSourcesSupportsPoolColumn().catch(() => {});
 
   if (method === 'GET') {
     const items = await sql/*sql*/ `
-      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
       FROM sources ORDER BY id
     `;
     return json({ ok: true, endpoint: 'sources', items }, 200);
@@ -38,7 +41,7 @@ export default async (req: Request, _context: Context) => {
     // 创建：若 id 已存在则返回 409 Conflict，避免覆盖已有 Source。
     // 使用 ON CONFLICT DO NOTHING + RETURNING 防止并发竞态下的重复插入。
     const created = await sql/*sql*/`
-    INSERT INTO sources (id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template)
+    INSERT INTO sources (id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool)
     VALUES (
       ${body.id},
       ${body.name ?? body.id},
@@ -47,10 +50,11 @@ export default async (req: Request, _context: Context) => {
       ${JSON.stringify(body.default_query ?? {})}::jsonb,
       ${JSON.stringify(body.rate_limit ?? { per_minute: 5 })}::jsonb,
       ${body.cache_ttl_s ?? 600},
-      ${body.key_template ?? '/'}
+      ${body.key_template ?? '/'},
+      ${Boolean(body.supports_pool ?? false)}
     )
     ON CONFLICT (id) DO NOTHING
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
     `;
     if (!created.length) {
       return json({ error: 'Source already exists', id: body.id }, 409);
