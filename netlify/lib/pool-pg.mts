@@ -42,6 +42,11 @@ async function ensureTable() {
   return _ensurePromise;
 }
 
+// 显式导出：供其他模块在需要时预创建表（例如手动触发任务前）
+export async function ensurePoolTable(): Promise<void> {
+  await ensureTable();
+}
+
 export interface PgPoolItemRow {
   item_id: string;
   item: unknown;

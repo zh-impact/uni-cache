@@ -6,6 +6,7 @@ import { acquire } from './rate-limit.mjs';
 import { getCacheEntry, setCacheEntry, computeExpiresAt } from './cache.mjs';
 import type { CacheDataEncoding, CacheEntry, RefreshJob } from './types.mjs';
 import { poolAddItem } from './pool.mjs';
+import { ensurePoolTable } from './pool-pg.mjs';
 
 const DEFAULT_MAX_PER_SOURCE = 20; // 每源单次最多处理作业数
 const DEFAULT_TIME_BUDGET_MS = 5_000; // 即时执行时间预算（毫秒）
@@ -197,6 +198,8 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         // 池模式：以 "/pool:" 开头的 key 被视为池采集作业
         const isPoolJob = typeof job.key === 'string' && job.key.startsWith('/pool:');
         if (isPoolJob) {
+          // 预创建表，避免首次任务未成功写入时表仍未创建的困惑
+          try { await ensurePoolTable(); } catch {}
           // 提取池 key（忽略 ?query，用于绕过去重的 nonce）
           const after = job.key.slice('/pool:'.length);
           const poolWithQS = after.length > 0 ? after : '/';
