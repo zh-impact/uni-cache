@@ -8,6 +8,13 @@
       "when": 1756739727989,
       "tag": "0000_free_phantom_reporter",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1756744925614,
+      "tag": "0001_perpetual_lady_bullseye",
+      "breakpoints": true
     }
   ]
 }

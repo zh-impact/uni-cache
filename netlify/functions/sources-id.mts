@@ -1,5 +1,7 @@
 import type { Config, Context } from "@netlify/functions";
-import { sql } from '../lib/db.mjs';
+import { eq } from 'drizzle-orm';
+import { db } from '../lib/drizzle.mjs';
+import { sources } from '../../src/db/schema.ts';
 import { ensureSourcesSupportsPoolColumn } from '../lib/sources-pg.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -25,43 +27,42 @@ export default async (req: Request, context: Context) => {
   await ensureSourcesSupportsPoolColumn().catch(() => {});
 
   if (method === "GET") {
-    // Placeholder: return a record if found, otherwise 404.
-    const item = await sql/*sql*/`
-      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
-      FROM sources WHERE id = ${source_id}
-    `;
-    if (!item.length) return json({ error: "Source not found" }, 404);
-    return json(item[0], 200);
+    const rows = await db.select().from(sources).where(eq(sources.id, source_id));
+    if (!rows.length) return json({ error: "Source not found" }, 404);
+    return json(rows[0], 200);
   }
 
   if (method === "PATCH") {
     let body: any = {};
     try { body = await req.json(); } catch {}
-    // Placeholder: apply a partial update and echo the updated row
-    const updated = await sql/*sql*/`
-    UPDATE sources
-    SET
-      name = ${body.name ?? source_id},
-      base_url = ${body.base_url ?? ''},
-      default_headers = ${JSON.stringify(body.default_headers ?? {})}::jsonb,
-      default_query = ${JSON.stringify(body.default_query ?? {})}::jsonb,
-      rate_limit = ${JSON.stringify(body.rate_limit ?? { per_minute: 5 })}::jsonb,
-      cache_ttl_s = ${body.cache_ttl_s ?? 600},
-      key_template = ${body.key_template ?? '/'},
-      supports_pool = COALESCE(${body.supports_pool ?? null}, supports_pool),
-      updated_at = now()
-    WHERE id = ${source_id}
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
-    `;
+
+    const updateValues: Partial<typeof sources.$inferInsert> = {
+      name: body.name ?? source_id,
+      base_url: body.base_url ?? '',
+      default_headers: body.default_headers ?? {},
+      default_query: body.default_query ?? {},
+      rate_limit: body.rate_limit ?? { per_minute: 5 },
+      cache_ttl_s: body.cache_ttl_s ?? 600,
+      key_template: body.key_template ?? '/',
+      // supports_pool preserves existing value if not provided
+    };
+    if (typeof body.supports_pool === 'boolean') {
+      updateValues.supports_pool = body.supports_pool;
+    }
+
+    const updated = await db
+      .update(sources)
+      .set(updateValues)
+      .where(eq(sources.id, source_id))
+      .returning();
+
+    if (!updated.length) return json({ error: "Source not found" }, 404);
     return json(updated[0], 200);
   }
 
   if (method === "DELETE") {
-    // Placeholder: mark deletion success
-    const deleted = await sql/*sql*/`
-    DELETE FROM sources WHERE id = ${source_id}
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
-    `;
+    const deleted = await db.delete(sources).where(eq(sources.id, source_id)).returning();
+    if (!deleted.length) return json({ error: "Source not found" }, 404);
     return json(deleted[0], 204);
   }
 

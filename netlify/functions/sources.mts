@@ -1,5 +1,7 @@
 import type { Config, Context } from '@netlify/functions';
-import { sql } from '../lib/db.mjs';
+import { asc } from 'drizzle-orm';
+import { db } from '../lib/drizzle.mjs';
+import { sources } from '../../src/db/schema.ts';
 import { ensureSourcesSupportsPoolColumn } from '../lib/sources-pg.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -20,10 +22,7 @@ export default async (req: Request, _context: Context) => {
   await ensureSourcesSupportsPoolColumn().catch(() => {});
 
   if (method === 'GET') {
-    const items = await sql/*sql*/ `
-      SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
-      FROM sources ORDER BY id
-    `;
+    const items = await db.select().from(sources).orderBy(asc(sources.id));
     return json({ ok: true, endpoint: 'sources', items }, 200);
   }
 
@@ -40,22 +39,24 @@ export default async (req: Request, _context: Context) => {
 
     // Create: if the id already exists, return 409 Conflict to avoid overwriting an existing Source.
     // Use ON CONFLICT DO NOTHING + RETURNING to prevent duplicate inserts under concurrency.
-    const created = await sql/*sql*/`
-    INSERT INTO sources (id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool)
-    VALUES (
-      ${body.id},
-      ${body.name ?? body.id},
-      ${body.base_url ?? ''},
-      ${JSON.stringify(body.default_headers ?? {})}::jsonb,
-      ${JSON.stringify(body.default_query ?? {})}::jsonb,
-      ${JSON.stringify(body.rate_limit ?? { per_minute: 5 })}::jsonb,
-      ${body.cache_ttl_s ?? 600},
-      ${body.key_template ?? '/'},
-      ${Boolean(body.supports_pool ?? false)}
-    )
-    ON CONFLICT (id) DO NOTHING
-    RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
-    `;
+    const values: typeof sources.$inferInsert = {
+      id: body.id,
+      name: body.name ?? body.id,
+      base_url: body.base_url ?? '',
+      default_headers: body.default_headers ?? {},
+      default_query: body.default_query ?? {},
+      rate_limit: body.rate_limit ?? { per_minute: 5 },
+      cache_ttl_s: body.cache_ttl_s ?? 600,
+      key_template: body.key_template ?? '/',
+      supports_pool: Boolean(body.supports_pool ?? false),
+    };
+
+    const created = await db
+      .insert(sources)
+      .values(values)
+      .onConflictDoNothing({ target: sources.id })
+      .returning();
+
     if (!created.length) {
       return json({ error: 'Source already exists', id: body.id }, 409);
     }
