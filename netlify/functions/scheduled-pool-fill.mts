@@ -20,7 +20,7 @@ function parseIntEnv(name: string, def?: number): number | undefined {
 }
 
 export default async (req: Request) => {
-  // Netlify Scheduled Functions 传递的 JSON 事件体可忽略
+  // Ignore the JSON event body sent by Netlify Scheduled Functions
   try {
     const evt = await req.json().catch(() => ({} as any));
     if ((evt as any)?.next_run) logger.info({ event: 'scheduled-pool-fill.next_run', next_run: (evt as any).next_run });
@@ -28,7 +28,7 @@ export default async (req: Request) => {
 
   const source_id = process.env.SCHEDULED_POOL_SOURCE_ID;
   const pool_key_raw = process.env.SCHEDULED_POOL_KEY; // e.g. /quotes
-  const prefetch = parseIntEnv('SCHEDULED_POOL_PREFETCH', 2) ?? 2; // 每次预入队条数（建议与上游每分钟限速相同）
+  const prefetch = parseIntEnv('SCHEDULED_POOL_PREFETCH', 2) ?? 2; // number of items to pre-enqueue each time (suggest matching upstream per-minute rate limit)
   const timeBudgetMs = parseIntEnv('SCHEDULED_POOL_TIME_BUDGET_MS', 3000);
 
   if (!source_id || !pool_key_raw) {
@@ -52,7 +52,7 @@ export default async (req: Request) => {
     logger.info({ event: 'scheduled-pool-fill.skip_prefetch', reason: 'queue_not_empty_or_prefetch_zero', source_id, qlen, prefetch });
   }
 
-  // 立即消费一轮（时间预算小）
+  // Consume one round immediately (small time budget)
   const run = await runOnce({ source_id, maxPerSource: prefetch, timeBudgetMs });
   return json({ endpoint: 'scheduled-pool-fill', prefetch: enqResult, run }, 200);
 };

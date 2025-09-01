@@ -1,7 +1,7 @@
 // netlify/lib/sources-pg.mts
 import { sql } from './db.mjs';
 
-// 确保 sources 表包含 supports_pool 字段
+// Ensure the sources table includes the supports_pool column
 export async function ensureSourcesSupportsPoolColumn(): Promise<void> {
   try {
     await sql/*sql*/`
@@ -9,12 +9,12 @@ export async function ensureSourcesSupportsPoolColumn(): Promise<void> {
       ADD COLUMN IF NOT EXISTS supports_pool boolean NOT NULL DEFAULT false
     `;
   } catch (e) {
-    // 忽略：若没有权限或其它原因失败，不影响读取逻辑（读取时做降级处理）
+    // Ignore errors: lack of permission or other failures should not break reads (degrade during read)
   }
 }
 
 export async function getSourceSupportsPool(source_id: string): Promise<boolean> {
-  // 最多尝试两次：第一次读取失败（字段不存在）则尝试添加字段后再读一次
+  // Try at most twice: if the first read fails (column missing), attempt to add the column then read again
   for (let i = 0; i < 2; i++) {
     try {
       const rows = await sql/*sql*/`
@@ -24,7 +24,7 @@ export async function getSourceSupportsPool(source_id: string): Promise<boolean>
       const v = rows[0]?.supports_pool;
       return Boolean(v);
     } catch {
-      // 可能是列不存在，尝试添加列
+      // Column may be missing; attempt to add it
       await ensureSourcesSupportsPoolColumn().catch(() => {});
     }
   }

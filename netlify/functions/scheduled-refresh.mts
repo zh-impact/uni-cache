@@ -18,7 +18,7 @@ function parseIntEnv(name: string): number | undefined {
 }
 
 export default async (req: Request) => {
-  // Netlify Scheduled Functions 会传递 JSON 事件体（包含 next_run 等），未提供也不影响
+  // Netlify Scheduled Functions send a JSON event body (with next_run, etc.); absence does not affect execution
   try {
     const evt = await req.json().catch(() => ({} as any));
     if ((evt as any)?.next_run) logger.info({ event: 'scheduled-refresh.next_run', next_run: (evt as any).next_run });

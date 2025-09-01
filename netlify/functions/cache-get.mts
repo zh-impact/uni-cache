@@ -27,7 +27,7 @@ export default async (req: Request, context: Context) => {
   const cacheOnly = /^true|1$/i.test(req.headers.get('X-UC-Cache-Only') || '');
   const ifNoneMatch = req.headers.get('If-None-Match');
 
-  // 尝试池随机返回：若该 key 作为池存在数据，则优先返回
+  // Try a random return from the pool: if this key has pool data, prefer returning it
   try {
     const poolItem = await poolRandom(source_id, key);
     if (poolItem) {
@@ -37,11 +37,11 @@ export default async (req: Request, context: Context) => {
       };
       const etag = poolItem.item_id;
       if (etag) headers['ETag'] = etag;
-      // If-None-Match 命中则返回 304
+      // Return 304 when If-None-Match matches the item_id
       if (ifNoneMatch && etag && ifNoneMatch.split(/\s*,\s*/).includes(etag)) {
         return new Response(null, { status: 304, headers });
       }
-      // BYPASS: 后台补池（入队 /pool: 作业）
+      // BYPASS: backfill the pool in the background (enqueue a /pool: job)
       if (bypass) {
         const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const sep = key.includes('?') ? '&' : '?';
@@ -66,8 +66,8 @@ export default async (req: Request, context: Context) => {
     }
   } catch {}
 
-  // 若 Source 开启了 pool 模式，则不回退到固定缓存。
-  // 动态导入，避免在无数据库配置的测试环境中抛错。
+  // If the Source enables pool mode, do not fall back to the fixed cache.
+  // Dynamic import to avoid throwing in test environments without DB config.
   try {
     const mod = await import('../lib/sources-pg.mjs');
     const supportsPool = await mod.getSourceSupportsPool(source_id);

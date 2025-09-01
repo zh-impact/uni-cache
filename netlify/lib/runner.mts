@@ -9,9 +9,9 @@ import { poolAddItem } from './pool.mjs';
 import { ensurePoolTable } from './pool-pg.mjs';
 import { logger } from './logger.mjs';
 
-const DEFAULT_MAX_PER_SOURCE = 20; // 每源单次最多处理作业数
-const DEFAULT_TIME_BUDGET_MS = 5_000; // 即时执行时间预算（毫秒）
-const MAX_ATTEMPTS = 3; // 瞬态错误重试的最大尝试次数（通过队列回推实现）
+const DEFAULT_MAX_PER_SOURCE = 20; // Max jobs per source per run
+const DEFAULT_TIME_BUDGET_MS = 5_000; // Time budget for immediate execution (ms)
+const MAX_ATTEMPTS = 3; // Max retry attempts for transient errors (via requeue)
 
 export type RunSummary = {
   ok: true;
@@ -46,7 +46,7 @@ function ensureHeaders(obj: Record<string, any> | null | undefined): Record<stri
 }
 
 function buildURL(base: string, path: string, q: Record<string, any> | null | undefined): string {
-  // 组合 base_url 与 key（key 通常以 "/" 开头）
+  // Combine base_url and key (key usually starts with "/")
   const u = new URL(path, base);
   if (q) {
     for (const [k, v] of Object.entries(q)) {
@@ -82,8 +82,8 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 针对 5xx/429 和网络错误的轻量重试 + 超时；
-// 非重试性状态（2xx/3xx/4xx except 429）直接返回响应。
+// Lightweight retry with timeout for 5xx/429 and network errors.
+// Non-retryable statuses (2xx/3xx/4xx except 429) return immediately.
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
@@ -101,7 +101,7 @@ async function fetchWithRetry(
     try {
       const res = await fetch(url, { ...init, signal: ac?.signal });
       lastRes = res;
-      // 5xx 或 429 认为是可重试；其他状态直接返回
+      // 5xx or 429 are considered retryable; other statuses return immediately
       if (res.status >= 500 || res.status === 429) {
         lastErr = new Error(`upstream status ${res.status}`);
       } else {
@@ -122,7 +122,7 @@ async function fetchWithRetry(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr ?? 'fetch failed'));
 }
 
-// Neon 返回 JSON 列可能为 string，这里对字段做一次宽松解析
+// Neon may return JSON columns as strings; do a lenient parse of fields
 const parseMaybeObj = <T extends unknown,>(v: unknown): T | null => {
   if (!v) return null;
   if (typeof v === 'string') {
@@ -160,12 +160,12 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
     const burst = Math.max(0, rlCfg?.burst ?? 0);
 
     for (let i = 0; i < maxPerSource; i++) {
-      if (Date.now() - started > timeBudgetMs) break; // 时间预算兜底
+      if (Date.now() - started > timeBudgetMs) break; // Guardrail for time budget
 
       const raw = (await redis.lpop(qkey)) as unknown;
       if (!raw) {
         logger.info({ event: 'runner.queue_empty', source_id: src.id, i, dequeued: perSource[src.id].dequeued });
-        break; // 队列空
+        break; // Queue is empty
       }
       perSource[src.id].dequeued++;
 
@@ -186,28 +186,29 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       }
       if (!job?.key) continue;
 
-      // 限速（简单固定窗）：仅在取到作业后扣额度；若不允许，放回队尾并停止当前源
+      // Rate limiting (simple fixed window): deduct quota only after dequeuing;
+      // if not allowed, push the job back to the tail and stop processing this source
       const rl = await acquire(src.id, { per_minute: perMinute, burst });
       if (!rl.allowed) {
-        // 统一回推标准化 JSON，避免将对象直接入队导致后续 JSON.parse 失败
+        // Always requeue standardized JSON to avoid JSON.parse failures when non-JSON objects are enqueued
         await redis.rpush(qkey, JSON.stringify(job));
         logger.info({ event: 'runner.rate_limit_deny', source_id: src.id, rl });
         break;
       }
 
       try {
-        // 池模式：以 "/pool:" 开头的 key 被视为池采集作业
+        // Pool mode: keys starting with "/pool:" are treated as pool collection jobs
         const isPoolJob = typeof job.key === 'string' && job.key.startsWith('/pool:');
         if (isPoolJob) {
-          // 预创建表，避免首次任务未成功写入时表仍未创建的困惑
+          // Pre-create the table to avoid confusion if the first write fails and the table isn't created
           try { await ensurePoolTable(); } catch {}
-          // 提取池 key，并去除仅用于去重的临时参数（保留业务查询参数）
+          // Extract the pool key, removing the temporary dedupe param while preserving business query params
           const after = job.key.slice('/pool:'.length);
           const poolWithQS = after.length > 0 ? after : '/';
           const pool_key = sanitizePoolKey(poolWithQS);
 
           const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
-          // 对稳定端点不携带条件请求头
+          // Do not send conditional request headers for stable endpoints
           const dq = parseMaybeObj<Record<string, any>>(src.default_query);
           const url = buildURL(src.base_url, pool_key, dq);
           const res = await fetchWithRetry(url, { method: 'GET', headers }, { attempts: 2, baseDelayMs: 200, timeoutMs: 2500 });
@@ -233,8 +234,8 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
           continue;
         }
 
-        // 常规模式：单条 key 缓存
-        // 条件请求：若已有缓存则携带 ETag/If-Modified-Since
+        // Regular mode: cache a single key
+        // Conditional request: include ETag/If-Modified-Since if we already have a cache entry
         const prev: CacheEntry | null = await getCacheEntry(src.id, job.key);
         const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
         if (prev?.meta?.etag) headers['If-None-Match'] = prev.meta.etag;
@@ -244,7 +245,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         const res = await fetchWithRetry(url, { method: 'GET', headers }, { attempts: 2, baseDelayMs: 200, timeoutMs: 2500 });
 
         if (res.status === 304 && prev) {
-          // 未修改：续期 TTL，并更新 cached_at
+          // Not modified: extend TTL and update cached_at
           const ttl_s = Number(src.cache_ttl_s ?? prev.meta.ttl_s ?? 600);
           const entry: CacheEntry = {
             data: prev.data,
@@ -262,7 +263,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
 
         if (!res.ok) {
           if (res.status === 429 || res.status === 502 || res.status === 503) {
-            // 视为瞬态错误：将作业放回队列尾部（增加 attempts），稍后重试
+            // Treat as transient error: push the job back to the tail (increase attempts) and retry later
             const nextAttempts = (job.attempts ?? 0) + 1;
             if (nextAttempts <= MAX_ATTEMPTS) {
               const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
@@ -284,9 +285,9 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
           meta: {
             source_id: src.id,
             key: job.key,
-            cached_at: new Date().toISOString(), // 将被 setCacheEntry 覆盖为当前时间
+            cached_at: new Date().toISOString(), // Will be overwritten by setCacheEntry with the current time
             expires_at: computeExpiresAt(ttl_s),
-            stale: false, // 将由 setCacheEntry 重新计算
+            stale: false, // Will be recomputed by setCacheEntry
             ttl_s,
             etag: etag ?? null,
             last_modified: lastMod ?? null,
@@ -299,7 +300,7 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
         perSource[src.id].updated++;
         logger.info({ event: 'runner.cache_updated', source_id: src.id, key: job.key, status: res.status, ttl_s, content_type: contentType, encoding });
       } catch (e) {
-        // 可能是网络错误/超时：按瞬态处理，回推队列（带 attempts 上限）
+        // Possibly a network error/timeout: treat as transient, requeue (with attempts cap)
         try {
           const nextAttempts = (job?.attempts ?? 0) + 1;
           if (job?.key && nextAttempts <= MAX_ATTEMPTS) {

@@ -1,7 +1,7 @@
 // netlify/lib/db.mts
 import { neon, neonConfig } from '@neondatabase/serverless';
 
-// 复用连接以减少冷启动握手
+// Reuse connections to reduce cold-start handshake overhead
 neonConfig.fetchConnectionCache = true;
 
 const url = process.env.DATABASE_URL;

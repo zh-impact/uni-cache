@@ -4,8 +4,8 @@ import { keyHash, normalizeKeyString, redisKeyDedup, redisKeyIdemp, redisQueueKe
 import type { EnqueueResult, RefreshJob } from './types.mjs';
 import { createHash } from 'node:crypto';
 
-export const DEFAULT_DEDUPE_TTL_S = 60; // 同键去重窗口
-export const DEFAULT_IDEMP_TTL_S = 15 * 60; // Idempotency-Key 生效窗口
+export const DEFAULT_DEDUPE_TTL_S = 60; // same-key dedupe window
+export const DEFAULT_IDEMP_TTL_S = 15 * 60; // Idempotency-Key validity window
 
 function sha1(input: string): string {
   return createHash('sha1').update(input).digest('hex');
@@ -27,7 +27,7 @@ export async function enqueueRefresh(job: RefreshJob, opts: EnqueueOptions = {})
   const normalizedKey = normalizeKeyString(job.key);
   const kh = keyHash(normalizedKey);
 
-  // 1) Idempotency-Key 保护（若提供则优先生效）
+  // 1) Idempotency-Key guard (takes precedence when provided)
   if (opts.idempotencyKey) {
     const idHash = sha1(`${source_id}:refresh:${normalizedKey}:${opts.idempotencyKey}`);
     const idKey = redisKeyIdemp(idHash);
@@ -37,14 +37,14 @@ export async function enqueueRefresh(job: RefreshJob, opts: EnqueueOptions = {})
     }
   }
 
-  // 2) 同键去重窗口（避免瞬时重复刷新）
+  // 2) Same-key dedupe window (avoid burst duplicate refreshes)
   const dedupKey = redisKeyDedup(source_id, kh);
   const ok = await redis.set(dedupKey, '1', { nx: true, ex: opts.dedupeTtlS ?? DEFAULT_DEDUPE_TTL_S });
   if (ok !== 'OK') {
     return { enqueued: false, reason: 'duplicate' };
   }
 
-  // 3) 入队（每源一条 List）
+  // 3) Enqueue (one list per source)
   const qkey = redisQueueKey(source_id);
   const jobId = createJobId();
   const record: Required<RefreshJob> = {
@@ -62,8 +62,8 @@ export async function enqueueRefresh(job: RefreshJob, opts: EnqueueOptions = {})
 export async function enqueueManyRefresh(jobs: RefreshJob[], opts: EnqueueOptions = {}): Promise<EnqueueResult[]> {
   const results: EnqueueResult[] = [];
   for (const j of jobs) {
-    // 对批量不强制共享同一个 Idempotency-Key；由调用侧决定是否传入统一 idempotencyKey
-    // 这里逐个入队，保持实现简单。如需性能，可改为 pipeline。
+    // For batches, do not enforce a shared Idempotency-Key; the caller decides whether to pass a unified idempotencyKey.
+    // Enqueue one by one to keep the implementation simple. For performance, could switch to a pipeline.
     // eslint-disable-next-line no-await-in-loop
     const r = await enqueueRefresh(j, opts);
     results.push(r);

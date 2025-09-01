@@ -10,10 +10,10 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
 }
 
 // TODO:
-// - 持久化存取单个 Source（Neon Postgres）
-// - 支持部分更新：PATCH 仅更新传入字段
-// - 删除时可支持 ?keep_cache=1
-// - 鉴权与审计日志
+// - Persist read/write for a single Source (Neon Postgres)
+// - Support partial updates: PATCH only updates provided fields
+// - Support ?keep_cache=1 on delete
+// - Authentication and audit logging
 export default async (req: Request, context: Context) => {
   const method = req.method.toUpperCase();
   const params = context.params || {};
@@ -21,11 +21,11 @@ export default async (req: Request, context: Context) => {
 
   if (!source_id) return json({ error: "source_id is required" }, 400);
 
-  // 确保列存在（幂等）
+  // Ensure the column exists (idempotent)
   await ensureSourcesSupportsPoolColumn().catch(() => {});
 
   if (method === "GET") {
-    // 占位：返回一个示例或 404。这里默认返回示例。
+    // Placeholder: return a record if found, otherwise 404.
     const item = await sql/*sql*/`
       SELECT id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool
       FROM sources WHERE id = ${source_id}
@@ -37,7 +37,7 @@ export default async (req: Request, context: Context) => {
   if (method === "PATCH") {
     let body: any = {};
     try { body = await req.json(); } catch {}
-    // 占位：回显部分更新
+    // Placeholder: apply a partial update and echo the updated row
     const updated = await sql/*sql*/`
     UPDATE sources
     SET
@@ -57,7 +57,7 @@ export default async (req: Request, context: Context) => {
   }
 
   if (method === "DELETE") {
-    // 占位：标记删除成功
+    // Placeholder: mark deletion success
     const deleted = await sql/*sql*/`
     DELETE FROM sources WHERE id = ${source_id}
     RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool

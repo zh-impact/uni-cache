@@ -36,13 +36,13 @@ export default async (req: Request, _context: Context) => {
   const maxPerSource = parseNum(body?.max_per_source ?? qp.get('max_per_source'));
   const timeBudgetMs = parseNum(body?.time_budget_ms ?? qp.get('time_budget_ms'));
 
-  // 可选：当手动触发且队列为空时，先对指定 keys 入队（继续走队列语义）
+  // Optional: when manually triggered and the queue is empty, enqueue the provided keys first (still use queue semantics)
   const keys: string[] = Array.isArray(body?.keys) ? (body.keys as string[]) : [];
   let prefetch: null | { enqueued: number; duplicates: number; idempotent_rejects: number; task_ids: string[] } = null;
   let queue_len_before: number | null = null;
   let queue_len_after_enqueue: number | null = null;
   let queue_len_after_run: number | null = null;
-  // 结构化日志：记录入参
+  // Structured logging: record input parameters
   const pool_keys_count = keys.filter((k) => typeof k === 'string' && k.startsWith('/pool:')).length;
   logger.info({
     event: 'tasks-run.parsed_inputs',

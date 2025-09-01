@@ -16,15 +16,15 @@ export function templateKey(template: string, params: Record<string, any>): stri
 export function normalizeKeyString(key: string): string {
   if (!key) return '/';
   let s = String(key).trim();
-  // 如果是 URL 编码的 key，尽量解码一次；失败则忽略
+  // If the key is URL-encoded, try decoding once; ignore failures
   try {
     s = decodeURIComponent(s);
   } catch {}
-  // 统一前缀斜杠，去掉多余斜杠
+  // Normalize leading slash and remove redundant slashes
   if (!s.startsWith('/')) s = '/' + s;
-  // 折叠连续斜杠为单个斜杠
+  // Collapse multiple slashes into a single slash
   s = s.replace(/\/{2,}/g, '/');
-  // 去掉尾部斜杠（根路径除外）
+  // Remove trailing slash (except for root)
   if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1);
   return s;
 }
@@ -66,22 +66,22 @@ export function redisKeyPoolItem(source_id: string, key_hash: string, item_id: s
   return `uc:pool:item:${source_id}:${key_hash}:${item_id}`;
 }
 
-// 仅用于池模式：
-// - 解码并规范化路径
-// - 保留业务查询参数，但移除用于去重的临时参数 i（由调度/预取附加）
-// - 忽略片段（#...）
+// For pool mode only:
+// - Decode and normalize path
+// - Keep business query params but remove transient dedupe param `i` (added by scheduler/prefetch)
+// - Ignore fragments (#...)
 export function sanitizePoolKey(raw: string): string {
   try {
     const normalized = normalizeKeyString(String(raw ?? ''));
-    // 使用虚拟基准解析，方便拆出 pathname 与 query
+    // Parse with a dummy base to easily extract pathname and query
     const u = new URL(normalized, 'http://uc.local');
-    // 移除用于去重的 nonce 参数
+    // Remove nonce param used for dedupe
     u.searchParams.delete('i');
     const qs = u.searchParams.toString();
     const path = u.pathname || '/';
     return qs ? `${path}?${qs}` : path;
   } catch {
-    // 兜底：至少保持规范的路径前缀
+    // Fallback: at least keep a normalized path prefix
     return normalizeKeyString(String(raw ?? ''));
   }
 }

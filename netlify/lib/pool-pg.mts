@@ -2,7 +2,7 @@
 import { sql } from './db.mjs';
 import { keyHash, normalizeKeyString } from './key.mjs';
 
-// Neon 返回 JSON 列可能为 string，这里做一次宽松解析
+// Neon may return JSON columns as strings; parse leniently here
 function parseMaybeObj<T>(v: unknown): T | null {
   if (!v) return null;
   if (typeof v === 'string') {
@@ -42,7 +42,7 @@ async function ensureTable() {
   return _ensurePromise;
 }
 
-// 显式导出：供其他模块在需要时预创建表（例如手动触发任务前）
+// Explicit export: allow other modules to pre-create the table when needed (e.g., before manually triggering tasks)
 export async function ensurePoolTable(): Promise<void> {
   await ensureTable();
 }

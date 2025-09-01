@@ -15,7 +15,8 @@ function envInt(name: string, def: number): number {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
-const POOL_ITEM_TTL_S = envInt('UC_POOL_ITEM_TTL_S', 24 * 60 * 60); // 默认 24h 的 Redis 热缓存
+const POOL_ITEM_TTL_S = envInt('UC_POOL_ITEM_TTL_S', 24 * 60 * 60); // Default 24h Redis hot cache
+// Default 24h Redis hot cache
 
 export type PoolAddPayload = {
   data: any;
@@ -24,11 +25,11 @@ export type PoolAddPayload = {
 };
 
 export async function poolAddItem(source_id: string, pool_key: string, payload: PoolAddPayload): Promise<{ item_id: string } | null> {
-  // 与 runner 使用相同的池键规范（保留业务查询参数，移除 nonce i）
+  // Use the same pool key normalization as the runner (keep business query params, remove nonce `i`)
   const normalized = sanitizePoolKey(pool_key);
   const kh = keyHash(normalized);
 
-  // 基于编码+内容计算稳定 item_id；json 直接 JSON.stringify（不稳定顺序可接受，首版简化）
+  // Compute a stable item_id based on encoding + content; for JSON, use JSON.stringify (non-stable key order acceptable here)
   let base: string;
   try {
     if (payload.encoding === 'json') base = `json:${JSON.stringify(payload.data)}`;
@@ -39,7 +40,7 @@ export async function poolAddItem(source_id: string, pool_key: string, payload: 
   }
   const item_id = sha1(base);
 
-  // 写入 PG（去重由 PK 保护）
+  // Write to Postgres (dedupe enforced by primary key)
   await pgPoolAddItem(source_id, normalized, {
     item_id,
     item: payload.data,
@@ -47,7 +48,7 @@ export async function poolAddItem(source_id: string, pool_key: string, payload: 
     content_type: payload.content_type ?? null,
   });
 
-  // 写入 Redis：集合 + 具体条目
+  // Write to Redis: set of IDs + the specific item payload
   const idsKey = redisKeyPoolIds(source_id, kh);
   const itemKey = redisKeyPoolItem(source_id, kh, item_id);
   try {
@@ -65,7 +66,7 @@ export async function poolRandom(
   source_id: string,
   pool_key: string
 ): Promise<{ item_id: string; data: any; encoding: CacheDataEncoding; content_type: string | null; from: 'redis' | 'pg'; created_at?: string } | null> {
-  // 与 runner 使用相同的池键规范
+  // Use the same pool key normalization as the runner
   const normalized = sanitizePoolKey(pool_key);
   const kh = keyHash(normalized);
   const idsKey = redisKeyPoolIds(source_id, kh);
@@ -76,7 +77,7 @@ export async function poolRandom(
       const itemKey = redisKeyPoolItem(source_id, kh, id);
       const obj = (await redis.get<{ data: any; encoding: CacheDataEncoding; content_type: string | null }>(itemKey)) || null;
       if (obj) return { item_id: id, data: obj.data, encoding: obj.encoding, content_type: obj.content_type ?? null, from: 'redis' };
-      // Redis 未命中具体条目 → 回 PG 再回填
+      // Redis miss on the specific item → fetch from Postgres and backfill
       const row = await pgPoolGetItemById(source_id, normalized, id);
       if (row) {
         try {
@@ -97,10 +98,10 @@ export async function poolRandom(
     }
   } catch {}
 
-  // Redis 集合为空或不存在 → 直接从 PG 随机
+  // If the Redis set is empty or missing → select randomly from Postgres
   const row = await pgPoolRandom(source_id, normalized);
   if (!row) return null;
-  // 回填 Redis：加入集合 + 条目
+  // Backfill Redis: add ID to set + store the item
   try {
     await redis.sadd(idsKey, row.item_id);
   } catch {}

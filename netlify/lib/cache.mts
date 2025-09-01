@@ -18,23 +18,23 @@ export async function getCacheEntry<T = unknown>(source_id: string, key: string)
   const k = redisKeyCache(source_id, keyHash(normalized));
   const val = await redis.get<CacheEntry<T>>(k);
   if (val) {
-    // 仅在未过期时才考虑提升 TTL
+    // Only consider bumping TTL when not expired
     const stale = isStale({ expires_at: val.meta?.expires_at } as any);
     if (!stale) {
-      // 异步尝试提升 TTL（命中才计数）；忽略异常
+      // Asynchronously attempt to bump TTL (only count on hits); ignore errors
       maybeBumpTtl(source_id, normalized).catch(() => {});
     }
     return val;
   }
-  // Redis 未命中 → 尝试从 Postgres 读取并回填 Redis
+  // Redis miss → try reading from Postgres and backfill Redis
   const fromPg = await pgGetCacheEntry<T>(source_id, key);
   if (!fromPg) return null;
-  // 计算剩余 TTL；若已过期则回填一个短 TTL，避免频繁读 PG
+  // Compute remaining TTL; if already expired, backfill with a short TTL to avoid frequent PG reads
   const ttl = ttlFromExpiresAt(fromPg.meta?.expires_at);
   try {
     await setCacheEntry<T>(source_id, key, fromPg, { ttl_s: ttl, persistToPg: false });
   } catch {}
-  // 回填后若未过期，再计数一次（便于刚从 PG 恢复的热点尽快提升 TTL）
+  // After backfill, if not expired, increment once more (so newly recovered hot keys from PG can bump TTL sooner)
   const stale = isStale({ expires_at: fromPg.meta?.expires_at } as any);
   if (!stale) {
     maybeBumpTtl(source_id, normalized).catch(() => {});
@@ -43,8 +43,8 @@ export async function getCacheEntry<T = unknown>(source_id: string, key: string)
 }
 
 export interface SetCacheEntryOptions {
-  ttl_s?: number; // 覆盖 TTL；默认写入 meta.ttl_s
-  persistToPg?: boolean; // 是否持久化到 Postgres，默认 true
+  ttl_s?: number; // Override TTL; defaults to meta.ttl_s
+  persistToPg?: boolean; // Whether to persist to Postgres; default true
 }
 
 export async function setCacheEntry<T = unknown>(
@@ -71,7 +71,7 @@ export async function setCacheEntry<T = unknown>(
   } else {
     await redis.set(k, copy);
   }
-  // 默认写入 Postgres（写透）；可通过 opts.persistToPg 关闭
+  // Write-through to Postgres by default; can be disabled via opts.persistToPg
   const persist = opts.persistToPg !== false;
   if (persist) {
     await pgSetCacheEntry(source_id, key, copy);
@@ -90,7 +90,7 @@ export function computeExpiresAt(ttl_s: number): string | null {
   return new Date(Date.now() + ttl_s * 1000).toISOString();
 }
 
-// 根据 expires_at 计算剩余 TTL；无过期则返回 0；若已过期回填一个短 TTL（60s）
+// Compute remaining TTL from expires_at; return 0 if no expiry; if expired, use a short backfill TTL (60s)
 function ttlFromExpiresAt(expires_at?: string | null): number {
   if (!expires_at) return 0;
   const remain = Math.floor((Date.parse(expires_at) - Date.now()) / 1000);
@@ -98,13 +98,13 @@ function ttlFromExpiresAt(expires_at?: string | null): number {
 }
 
 
-// 动态 TTL 提升：当某个 key 在时间窗口内被频繁命中时，延长其 Redis TTL（不修改 PG 持久层 nor meta.expires_at）
+// Dynamic TTL bump: when a key is frequently hit within a time window, extend its Redis TTL (does not change PG storage nor meta.expires_at)
 export interface TtlBumpOptions {
-  window_s: number; // 计数窗口秒数
-  threshold: number; // 窗口内命中次数阈值，达到后触发 TTL 提升
-  delta_s: number; // 每次提升增加的秒数
-  max_ttl_s: number; // TTL 上限（防止无限增长）
-  cooldown_s: number; // 提升后的冷却期，在冷却内不重复提升
+  window_s: number; // Counting window in seconds
+  threshold: number; // Hit count threshold within the window to trigger TTL bump
+  delta_s: number; // Seconds to add on each bump
+  max_ttl_s: number; // TTL upper bound (prevents unbounded growth)
+  cooldown_s: number; // Cooldown after a bump; do not re-bump during cooldown
 }
 
 function envInt(name: string, def: number): number {
@@ -118,7 +118,7 @@ export async function maybeBumpTtl(
   key: string,
   opts: Partial<TtlBumpOptions> = {}
 ): Promise<{ bumped: boolean; newTtl?: number; reason?: string; count?: number }> {
-  // 环境参数（可覆盖）
+  // Environment parameters (overridable)
   const window_s = opts.window_s ?? envInt('UC_TTL_BUMP_WINDOW_S', 60);
   const threshold = opts.threshold ?? envInt('UC_TTL_BUMP_THRESHOLD', 20);
   const delta_s = opts.delta_s ?? envInt('UC_TTL_BUMP_DELTA_S', 60);
@@ -135,7 +135,7 @@ export async function maybeBumpTtl(
   const hitsKey = redisKeyHot(source_id, kh);
   const cdKey = redisKeyHotCooldown(source_id, kh);
 
-  // 冷却中则跳过
+  // Skip if in cooldown
   try {
     const cdTtl = await redis.ttl(cdKey);
     if (typeof cdTtl === 'number' && cdTtl > 0) {
@@ -143,7 +143,7 @@ export async function maybeBumpTtl(
     }
   } catch {}
 
-  // 命中计数 + 过期时间形成近似滑动窗口（固定窗口 + 自然过期）
+  // Hit counter + expiry approximates a sliding window (fixed window + natural expiration)
   let count = 0;
   try {
     count = (await redis.incr(hitsKey)) as unknown as number;
@@ -151,7 +151,7 @@ export async function maybeBumpTtl(
       await redis.expire(hitsKey, window_s);
     }
   } catch {
-    // 计数失败不影响主流程
+    // Counter failure does not affect the main flow
     return { bumped: false, reason: 'counter_error' };
   }
 
@@ -160,10 +160,10 @@ export async function maybeBumpTtl(
   }
 
   try {
-    // 触发一次后进入冷却，避免抖动
+    // Enter cooldown after a bump to avoid thrashing
     await redis.set(cdKey, '1', { ex: cooldown_s });
 
-    // 获取当前 TTL，仅当已有 TTL (>0) 时才可提升；-1(无过期)或-2(不存在)则跳过
+    // Fetch current TTL; only bump if TTL (>0). Skip -1 (no expiry) or -2 (does not exist)
     const curTtl = (await redis.ttl(cacheKey)) as unknown as number;
     if (typeof curTtl !== 'number' || curTtl <= 0) {
       return { bumped: false, reason: 'no_ttl', count };

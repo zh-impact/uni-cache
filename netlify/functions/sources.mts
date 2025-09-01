@@ -10,13 +10,13 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
 }
 
 // TODO:
-// - 接入 Neon Postgres 持久化 Source：id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
-// - 校验请求体并返回 400/422 等错误码
-// - 幂等创建（可用 Idempotency-Key）
-// - 鉴权：仅管理员可访问
+// - Integrate Neon Postgres for persisting Source: id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
+// - Validate request body and return 400/422 error codes when invalid
+// - Idempotent creation (with Idempotency-Key)
+// - Authorization: admin-only access
 export default async (req: Request, _context: Context) => {
   const method = req.method.toUpperCase();
-  // 尝试确保 supports_pool 列存在（幂等）
+  // Try to ensure the supports_pool column exists (idempotent)
   await ensureSourcesSupportsPoolColumn().catch(() => {});
 
   if (method === 'GET') {
@@ -33,13 +33,13 @@ export default async (req: Request, _context: Context) => {
       body = await req.json();
     } catch {}
 
-    // 最小校验：id 必填
+    // Minimal validation: id is required
     if (!body || typeof body.id !== 'string' || !body.id.trim()) {
       return json({ error: 'id is required' }, 422);
     }
 
-    // 创建：若 id 已存在则返回 409 Conflict，避免覆盖已有 Source。
-    // 使用 ON CONFLICT DO NOTHING + RETURNING 防止并发竞态下的重复插入。
+    // Create: if the id already exists, return 409 Conflict to avoid overwriting an existing Source.
+    // Use ON CONFLICT DO NOTHING + RETURNING to prevent duplicate inserts under concurrency.
     const created = await sql/*sql*/`
     INSERT INTO sources (id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template, supports_pool)
     VALUES (

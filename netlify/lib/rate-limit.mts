@@ -1,6 +1,6 @@
 // netlify/lib/rate-limit.mts
-// 简化版固定时间窗限速：按分钟计数（per_minute + burst）
-// 若需更精确可改为令牌桶或滑动窗口。
+// Simplified fixed-window rate limiting: per-minute counter (per_minute + burst)
+// For more accuracy, switch to a token bucket or sliding window.
 import { redis } from './redis.mjs';
 import type { RateLimitDecision } from './types.mjs';
 
@@ -33,10 +33,10 @@ export async function acquire(source_id: string, cfg: RateLimitConfig): Promise<
   const limit = Math.max(0, cfg?.per_minute ?? 0) + Math.max(0, cfg?.burst ?? 0);
   const k = windowKey(source_id);
 
-  // 自增当前分钟计数，并对首次设置 TTL（留 2 分钟兜底，覆盖跨窗口调用）
+  // Increment this minute's counter; on first increment set TTL (2-minute buffer to cover cross-window calls)
   const current = await redis.incr(k);
   if (current === 1) {
-    // 120s 过期，保证窗口结束后自动清理
+    // 120s expiry to ensure cleanup after the window ends
     await redis.expire(k, 120);
   }
 

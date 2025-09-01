@@ -3,13 +3,13 @@ import { sql } from './db.mjs';
 import { keyHash, normalizeKeyString } from './key.mjs';
 import type { CacheEntry } from './types.mjs';
 
-// 轻量 isStale，避免依赖 cache.mts 造成循环引用
+// Lightweight isStale to avoid depending on cache.mts and causing a circular reference
 function isStale(expires_at: string | null | undefined): boolean {
   if (!expires_at) return false;
   return Date.now() >= Date.parse(expires_at);
 }
 
-// Neon：确保表存在（进程内只执行一次）
+// Neon: ensure table exists (execute once per process)
 let _ensurePromise: Promise<void> | null = null;
 async function ensureTable() {
   if (_ensurePromise) return _ensurePromise;
@@ -31,7 +31,7 @@ async function ensureTable() {
         PRIMARY KEY (source_id, key_hash)
       )
     `;
-    // 辅助索引：按 source_id + key 列表/查询
+    // Helper index: list/query by source_id + key
     await sql/*sql*/`
       CREATE INDEX IF NOT EXISTS cache_entries_source_key_idx
       ON cache_entries(source_id, key)
@@ -40,7 +40,7 @@ async function ensureTable() {
   return _ensurePromise;
 }
 
-// Neon 返回 JSON 列可能为 string，这里做一次宽松解析
+// Neon may return JSON columns as strings; parse leniently here
 function parseMaybeObj<T>(v: unknown): T | null {
   if (!v) return null;
   if (typeof v === 'string') {
@@ -68,7 +68,7 @@ export async function pgGetCacheEntry<T = unknown>(source_id: string, key: strin
   if (!row) return null;
   const entry = parseMaybeObj<CacheEntry<T>>(row.entry);
   if (!entry) return null;
-  // 纠正关键字段与 stale
+  // Fix critical fields and the stale flag
   entry.meta = {
     ...entry.meta,
     source_id,
