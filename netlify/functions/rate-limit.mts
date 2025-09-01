@@ -8,8 +8,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405);
+export async function GET(req: Request, context: Context) {
   const params = context.params || {};
   const source_id = (params['source_id'] as string) ?? undefined;
   if (!source_id) return json({ error: 'source_id is required' }, 422);
@@ -31,8 +30,13 @@ export default async (req: Request, context: Context) => {
       'X-RateLimit-Reset': decision.reset_at,
     }
   );
+}
+
+export default async (req: Request, context: Context) => {
+  return GET(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/rate-limit/:source_id',
+  method: 'GET',
 };

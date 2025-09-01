@@ -7,8 +7,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+export async function GET(req: Request, context: Context) {
   const url = new URL(req.url);
   const params = context.params || {};
   const source_id = (params["source_id"] as string) ?? url.searchParams.get("source_id") ?? undefined;
@@ -16,8 +15,13 @@ export default async (req: Request, context: Context) => {
   const cursor = url.searchParams.get("cursor");
   const limit = Number(url.searchParams.get("limit") ?? 50);
   return json({ ok: true, endpoint: "cache-list", source_id, items: [], next_cursor: null, limit, prefix, cursor });
+}
+
+export default async (req: Request, context: Context) => {
+  return GET(req, context);
 };
 
 export const config: Config = {
   path: "/api/v1/cache/:source_id/list",
+  method: "GET",
 };

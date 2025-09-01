@@ -8,8 +8,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405);
+export async function POST(req: Request, context: Context) {
   const params = context.params || {};
   const source_id = params['source_id'] as string | undefined;
   const key = params['key'] as string | undefined;
@@ -34,8 +33,13 @@ export default async (req: Request, context: Context) => {
     return json({ error: 'Duplicate job in dedupe window' }, 409);
   }
   return json({ error: 'Invalid request' }, 422);
+}
+
+export default async (req: Request, context: Context) => {
+  return POST(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/:key/refresh',
+  method: 'POST',
 };

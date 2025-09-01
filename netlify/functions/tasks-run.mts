@@ -15,12 +15,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, _context: Context) => {
-  if (req.method !== 'POST') {
-    logger.warn({ event: 'tasks-run.method_not_allowed', method: req.method });
-    return json({ error: 'Method Not Allowed' }, 405);
-  }
-
+export async function POST(req: Request, _context: Context) {
   const url = new URL(req.url);
   const qp = url.searchParams;
   const body = (await req.json().catch(() => ({} as any))) as any;
@@ -105,8 +100,13 @@ export default async (req: Request, _context: Context) => {
     run_opts: runOpts,
   };
   return json(resp, 200);
+}
+
+export default async (req: Request, _context: Context) => {
+  return POST(req, _context);
 };
 
 export const config: Config = {
   path: '/api/v1/tasks/run',
+  method: 'POST',
 };

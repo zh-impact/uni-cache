@@ -8,8 +8,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405);
+export async function GET(req: Request, context: Context) {
   const url = new URL(req.url);
   const params = context.params || {};
   const source_id = (params['source_id'] as string) ?? url.searchParams.get('source_id') ?? undefined;
@@ -34,8 +33,13 @@ export default async (req: Request, context: Context) => {
   }
 
   return json({ key: entry.meta.key, source_id: entry.meta.source_id, meta: { ...entry.meta, stale } }, 200, headers);
+}
+
+export default async (req: Request, context: Context) => {
+  return GET(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/:key/meta',
+  method: 'GET',
 };

@@ -10,8 +10,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405);
+export async function POST(req: Request, context: Context) {
   let body: any = {};
   try {
     body = await req.json();
@@ -50,8 +49,13 @@ export default async (req: Request, context: Context) => {
 
   const enqCount = items.filter((it) => it.hit === false).length; // approximate; exact would need enqueue results
   return json({ ok: true, endpoint: 'cache-batch-get', items }, 200, { 'X-UC-Tasks-Count': String(enqCount) });
+}
+
+export default async (req: Request, context: Context) => {
+  return POST(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/batch-get',
+  method: 'POST',
 };

@@ -7,11 +7,15 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, _context: Context) => {
-  if (req.method !== "GET") return json({ error: "Method Not Allowed" }, 405);
+export async function GET(_req: Request, _context: Context) {
   return json({ status: "ok", time: new Date().toISOString() });
+}
+
+export default async (req: Request, context: Context) => {
+  return GET(req, context);
 };
 
 export const config: Config = {
   path: "/api/v1/healthz",
+  method: "GET",
 };

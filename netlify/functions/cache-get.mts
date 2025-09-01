@@ -11,8 +11,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'GET') return json({ error: 'Method Not Allowed' }, 405);
+export async function GET(req: Request, context: Context) {
 
   const url = new URL(req.url);
   const params = context.params || {};
@@ -127,8 +126,13 @@ export default async (req: Request, context: Context) => {
     'X-UC-Cache': 'MISS',
     'X-UC-Task-Id': r.jobId ?? '',
   });
+}
+
+export default async (req: Request, context: Context) => {
+  return GET(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/:key',
+  method: 'GET',
 };

@@ -9,8 +9,7 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405);
+export async function POST(req: Request, context: Context) {
   let body: any = {};
   try {
     body = await req.json();
@@ -42,8 +41,13 @@ export default async (req: Request, context: Context) => {
     202,
     { 'X-UC-Tasks-Count': String(task_ids.length) }
   );
+}
+
+export default async (req: Request, context: Context) => {
+  return POST(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/prefetch',
+  method: 'POST',
 };

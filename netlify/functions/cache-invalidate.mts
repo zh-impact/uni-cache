@@ -5,12 +5,7 @@ function json(_data: unknown, status = 204, headers: Record<string, string> = {}
   return new Response(null, { status, headers });
 }
 
-export default async (req: Request, context: Context) => {
-  if (req.method !== 'POST')
-    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
-      status: 405,
-      headers: { 'content-type': 'application/json; charset=utf-8' },
-    });
+export async function POST(_req: Request, context: Context) {
   const params = context.params || {};
   const source_id = params['source_id'] as string | undefined;
   const key = params['key'] as string | undefined;
@@ -22,8 +17,13 @@ export default async (req: Request, context: Context) => {
   }
   const deleted = await delCacheEntry(source_id, key);
   return json(null, 204, { 'X-UC-Deleted': String(deleted) });
+}
+
+export default async (req: Request, context: Context) => {
+  return POST(req, context);
 };
 
 export const config: Config = {
   path: '/api/v1/cache/:source_id/:key/invalidate',
+  method: 'POST',
 };
