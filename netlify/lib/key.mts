@@ -45,6 +45,14 @@ export function redisKeyIdemp(hash: string): string {
   return `uc:idemp:${hash}`;
 }
 
+export function redisKeyHot(source_id: string, key_hash: string): string {
+  return `uc:hot:${source_id}:${key_hash}`;
+}
+
+export function redisKeyHotCooldown(source_id: string, key_hash: string): string {
+  return `uc:hotcd:${source_id}:${key_hash}`;
+}
+
 export function redisQueueKey(source_id: string): string {
   return `uc:q:${source_id}`;
 }
