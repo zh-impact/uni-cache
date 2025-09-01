@@ -50,6 +50,9 @@
   - 命中 Upstash → 返回；
   - 未命中 → 视策略返回 202 并入队刷新，或同步向上游拉取（受限速约束）。
   - 池模式：当 `key` 对应池时，优先从池随机返回一条历史项；响应头 `X-UC-Served-From: pool-redis | pool-pg`，`ETag` 设置为池 `item_id`，支持 304。
+  - 强制池模式（per‑source）：当 `source.supports_pool=true` 时，读路径仅使用池；若池为空：
+    - 无 `X-UC-Cache-Only`：入队池刷新 Job 并返回 202（`X-UC-Served-From: pool-none`）
+    - `X-UC-Cache-Only: true`：返回 404（`X-UC-Served-From: pool-none`）
   - 详见 `docs/api.md` 的“池模式”章节。
 - ETag/If-None-Match 支持；`X-UC-Cache: HIT|MISS|STALE|BYPASS`。
 
@@ -127,6 +130,7 @@ CREATE TABLE sources (
   rate_limit JSONB NOT NULL, -- { per_minute: int, burst?: int }
   cache_ttl_s INT NOT NULL,
   key_template TEXT NOT NULL,
+  supports_pool BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -170,6 +174,7 @@ CREATE TABLE pool_entries (
   - 去重：对标准化项序列化后取 SHA1 作为 `item_id`。
   - 读：先读 Redis Set 随机成员；若缺，则从 PG 随机选取并回填 Redis。
   - 写：从上游抓取后调用池写入，Redis 热缓存 + PG 持久化。
+- 强制仅池读取：由每源配置 `supports_pool` 控制；启用时读路径不回落到单值缓存。
 - 键规范化与哈希：使用 `normalizeKeyString` 与 `keyHash` 计算 `key_hash`。
 
 ---
@@ -179,7 +184,7 @@ CREATE TABLE pool_entries (
 ### 5.1 读取（命中/未命中/陈旧）
 1) 计算规范化键与 `key_hash`；
 2) Redis 读取：
-   - 池键：若为池模式，则从池中随机返回（优先 Redis，兜底 PG），并设置 `ETag=item_id`；条件请求命中返回 304。
+   - 池键：若为池模式，则从池中随机返回（优先 Redis，兜底 PG），并设置 `ETag=item_id`；条件请求命中返回 304。若 `source.supports_pool=true` 且池为空：无 `X-UC-Cache-Only` → 入队池刷新并返回 202（`X-UC-Served-From: pool-none`）；`X-UC-Cache-Only: true` → 返回 404（`X-UC-Served-From: pool-none`）。
    - 命中新鲜 → 返回 200（`X-UC-Cache: HIT`）。
    - 命中陈旧 → 返回 200（`STALE`），后台入队刷新。
    - 未命中 → 入队刷新并返回 202（或在 `Bypass-Cache` 且配额充足时直连上游，成功写回后返回 200）。

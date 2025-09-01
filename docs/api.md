@@ -32,7 +32,7 @@
 - `Cache-Control`：对下游客户端的建议缓存策略（不替代服务端缓存）。
 - 限速头（针对本服务对上游的配额，而非下游客户端）：`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`。
 - `X-UC-Trace-Id: <id>`：请求级唯一标识（与错误响应 `request_id` 对应）。
-- `X-UC-Served-From: redis | postgres | upstream | stale | memory | pool-redis | pool-pg`：本次响应来源（池模式命中时为 `pool-redis` 或 `pool-pg`）。
+- `X-UC-Served-From: redis | postgres | upstream | stale | memory | pool-redis | pool-pg | pool-none`：本次响应来源（池模式命中时为 `pool-redis` 或 `pool-pg`；池模式强制且未命中时为 `pool-none`）。
 - `X-UC-Origin-Status: <int>`：最近一次上游抓取的 HTTP 状态码（可选）。
 - `X-UC-Source-Id: <source_id>`：当前命中的源标识。
 
@@ -46,6 +46,7 @@
   - `rate_limit`（object）：`{"per_minute": number, "burst"?: number}`
   - `cache_ttl_s`（number）：默认缓存 TTL。
   - `key_template`（string）：键生成规则，例如：`/users/{{user_id}}/profile`。
+  - `supports_pool`（boolean，默认 false）：是否对该源强制“仅池读取”。
 - CacheEntry（缓存条目）：
   - `source_id`、`key`、`params`（object）
   - `data`（任意 JSON）
@@ -88,7 +89,8 @@
   "default_headers": {"Authorization": "Bearer <upstream-token>"},
   "rate_limit": {"per_minute": 5, "burst": 2},
   "cache_ttl_s": 600,
-  "key_template": "/weather/{{city}}"
+  "key_template": "/weather/{{city}}",
+  "supports_pool": false
 }
 ```
 - 响应 201：返回完整 Source。
@@ -104,7 +106,7 @@
 
 ### PATCH /api/v1/sources/{source_id}
 - 描述：部分更新（如限速、TTL、头部）。
-- 请求体：允许任意可更新字段。
+- 请求体：允许任意可更新字段（含 `supports_pool`）。
 - 响应 200：更新后的 Source。
 
 ### DELETE /api/v1/sources/{source_id}
@@ -170,10 +172,12 @@
 - 响应 200：`{"key":"...","cached_at":"...","stale":false,...}`
 
 ### 池模式（Stable Endpoint Cache Pool）
-- 场景：对于“稳定端点（如随机语录）”，我们维护一个持久化的“池”。读取同一个 `key`（例如 `/quotes`）时，将从池中随机返回一条历史抓取项，而不是只维护单条缓存。
-- 读取方式：沿用同一读取端点 `GET /api/v1/cache/{source_id}/{key}`。当该 `key` 有池数据时，优先返回随机池项；否则按常规缓存逻辑。
+- 场景：对于“稳定端点（如随机语录）”，我们维护一个持久化的“池”。读取同一个 `key`（例如 `/quotes`）时，从池中随机返回一条历史抓取项，而不是只维护单条缓存。
+- 读取方式：沿用 `GET /api/v1/cache/{source_id}/{key}`，分两种模式：
+  - 兼容模式（默认，`supports_pool=false`）：当该 `key` 有池数据时优先返回随机池项；若池为空，则按常规单值缓存逻辑处理。
+  - 强制模式（每源可配，`supports_pool=true`）：仅从池读取；若池为空则不回落到常规缓存。
 - 响应特性：
-  - 头：`X-UC-Served-From: pool-redis | pool-pg`；`ETag: <item_id>`（为池项唯一 ID）。
+  - 头：`X-UC-Served-From: pool-redis | pool-pg`（命中池）；`pool-none`（强制模式且池为空）；`ETag: <item_id>`（为池项唯一 ID，仅命中池时返回）。
   - 条件请求：`If-None-Match` 命中 `ETag`（item_id）时返回 304。
   - 体：
     ```json
@@ -190,6 +194,14 @@
       }
     }
     ```
+- 强制模式下的未命中：
+  - 无 `X-UC-Cache-Only`：入队一次池刷新作业并返回 `202 Accepted`，响应头 `X-UC-Served-From: pool-none`；响应体可返回轻量 meta：
+    ```json
+    {
+      "meta": {"pool": true, "served_from": "pool-none", "enqueued": true}
+    }
+    ```
+  - `X-UC-Cache-Only: true`：不触发入队，返回 `404 Not Found`，并带 `X-UC-Served-From: pool-none`。
 - 刷新提示：当客户端发送 `X-UC-Bypass-Cache: true` 且命中池时，不会阻塞当前请求，而是异步入队一个“池刷新作业”以增量补池。
 - 内部约定（了解即可）：池刷新作业使用特殊键格式 `/pool:{key}?i=<nonce>`，其中 `nonce` 用于绕过队列去重；运行器检测以 `/pool:` 开头的作业并将上游返回加入池。
 

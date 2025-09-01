@@ -37,10 +37,15 @@ Uni-Cache provides a stable, unthrottled facade over third‑party APIs by decou
 - Source management
   - Create, update, delete, and list sources with identifiers, default request parameters, default cache policy (e.g., TTL), and rate‑limit policy.
   - Validate inputs and reject malformed or conflicting configurations.
+  - Configure per‑source pool mode via a boolean field `supports_pool` (default false).
 - Cache reads
   - Retrieve a single entry by source and key; return payload and metadata indicating freshness (HIT/MISS/STALE).
   - Batch read multiple keys; list keys by prefix with pagination; fetch metadata without payload when requested.
   - Support optional client hints to read from cache only or to bypass cache; define fallback behavior when hints cannot be honored.
+  - Pool mode for stable endpoints: when pool data exists, return a random pool item with `ETag=item_id` and 304 support.
+  - When `supports_pool=true` for a source, enforce pool‑only reads: if the pool is empty for a key, do not fall back to single‑value cache.
+    - Without `X-UC-Cache-Only`: enqueue a pool refresh job and return `202 Accepted` with header `X-UC-Served-From: pool-none`.
+    - With `X-UC-Cache-Only: true`: return `404 Not Found` with header `X-UC-Served-From: pool-none`.
 - Refresh & prefetch
   - On MISS or STALE, enqueue a background refresh according to source policy.
   - Manually refresh a specific key; batch prefetch a list of keys.
@@ -80,6 +85,9 @@ Uni-Cache provides a stable, unthrottled facade over third‑party APIs by decou
 - Refresh & prefetch: on‑demand refresh and batch prefetch requests are accepted once per key (idempotent); optional short wait completes within a bounded timeout.
 - Invalidate: after invalidation, the next read behaves as MISS until data is repopulated.
 - Health & metrics: health reports service readiness; basic metrics expose hits, misses, stale serves, and failures.
+- Pool mode correctness:
+  - When pool data exists, reads return a random pool item and set `ETag` to the pool `item_id`; conditional requests matching `If-None-Match` return 304.
+  - For sources with `supports_pool=true`, reads never fall back to single‑value cache; pool‑empty handling follows 202/404 semantics with `X-UC-Served-From: pool-none`.
 
 ### Out of Scope (for this phase)
 
@@ -101,6 +109,8 @@ Uni-Cache provides a stable, unthrottled facade over third‑party APIs by decou
 - SLO: Target objectives for performance and availability defined by this document.
 - Admin Operation: Privileged actions such as managing sources or cache control operations (refresh/prefetch/invalidate).
 - Client Hints: Optional request signals that influence behavior (e.g., cache‑only, bypass cache, short wait), subject to policy.
+- Pool mode: A mode where stable endpoints maintain multiple historical items and reads return a random pool item; `ETag` equals the pool `item_id`.
+- supports_pool: A per‑source boolean flag to enforce pool‑only reads; default false.
 
 ### Success Metrics
 
