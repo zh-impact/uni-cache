@@ -2,6 +2,7 @@ import type { Config, Context } from '@netlify/functions';
 import { getCacheEntry, isStale } from '../lib/cache.mjs';
 import { enqueueRefresh } from '../lib/queue.mjs';
 import type { CacheEntry } from '../lib/types.mjs';
+import { poolRandom } from '../lib/pool.mjs';
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -25,6 +26,44 @@ export default async (req: Request, context: Context) => {
   const bypass = /^true|1$/i.test(req.headers.get('X-UC-Bypass-Cache') || '');
   const cacheOnly = /^true|1$/i.test(req.headers.get('X-UC-Cache-Only') || '');
   const ifNoneMatch = req.headers.get('If-None-Match');
+
+  // 尝试池随机返回：若该 key 作为池存在数据，则优先返回
+  try {
+    const poolItem = await poolRandom(source_id, key);
+    if (poolItem) {
+      const headers: Record<string, string> = {
+        'X-UC-Cache': bypass ? 'BYPASS' : 'HIT',
+        'X-UC-Served-From': `pool-${poolItem.from}`,
+      };
+      const etag = poolItem.item_id;
+      if (etag) headers['ETag'] = etag;
+      // If-None-Match 命中则返回 304
+      if (ifNoneMatch && etag && ifNoneMatch.split(/\s*,\s*/).includes(etag)) {
+        return new Response(null, { status: 304, headers });
+      }
+      // BYPASS: 后台补池（入队 /pool: 作业）
+      if (bypass) {
+        const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        enqueueRefresh({ source_id, key: `/pool:${key}?i=${encodeURIComponent(nonce)}` }).catch(() => {});
+      }
+      return json(
+        {
+          data: poolItem.data,
+          meta: {
+            source_id,
+            key,
+            pool: true,
+            item_id: poolItem.item_id,
+            content_type: poolItem.content_type ?? null,
+            data_encoding: poolItem.encoding,
+            served_from: `pool-${poolItem.from}`,
+          },
+        },
+        200,
+        headers
+      );
+    }
+  } catch {}
 
   const entry: CacheEntry | null = await getCacheEntry(source_id, key);
 

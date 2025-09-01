@@ -56,3 +56,12 @@ export function redisKeyHotCooldown(source_id: string, key_hash: string): string
 export function redisQueueKey(source_id: string): string {
   return `uc:q:${source_id}`;
 }
+
+// Pool keys for list/pool support
+export function redisKeyPoolIds(source_id: string, key_hash: string): string {
+  return `uc:pool:ids:${source_id}:${key_hash}`;
+}
+
+export function redisKeyPoolItem(source_id: string, key_hash: string, item_id: string): string {
+  return `uc:pool:item:${source_id}:${key_hash}:${item_id}`;
+}

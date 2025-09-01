@@ -49,6 +49,8 @@
 - 读路径：
   - 命中 Upstash → 返回；
   - 未命中 → 视策略返回 202 并入队刷新，或同步向上游拉取（受限速约束）。
+  - 池模式：当 `key` 对应池时，优先从池随机返回一条历史项；响应头 `X-UC-Served-From: pool-redis | pool-pg`，`ETag` 设置为池 `item_id`，支持 304。
+  - 详见 `docs/api.md` 的“池模式”章节。
 - ETag/If-None-Match 支持；`X-UC-Cache: HIT|MISS|STALE|BYPASS`。
 
 ### 3.2 Refresh/Prefetch/Invalidate 服务
@@ -59,6 +61,8 @@
 - 写路径：
   - 仅入队（Upstash 队列/Stream）；由工作者函数消费，避免冷启动风暴。
   - 支持 `Idempotency-Key` 幂等去重（Redis `SETNX` + TTL）。
+  - 池作业键规范：`/pool:{key}?i=<nonce>`；`nonce` 用于绕过去重。
+  - 运行器识别以 `/pool:` 开头的作业：直连上游抓取并调用池写入（不写单值缓存），用于为稳定端点累计历史项。
 
 ### 3.3 Source 管理服务（Admin）
 - 端点：`/api/v1/sources*`
@@ -107,6 +111,8 @@
   - 幂等：`uc:idemp:{hash}` TTL 窗口；
   - 任务队列：`uc:q:{source_id}`（List/Stream）；
   - 配置版本：`uc:cfg:ver:{source_id}`。
+  - 池 ID 集合：`uc:pool:ids:{source_id}:{key_hash}`（Set），成员为 `item_id`。
+  - 池项：`uc:pool:item:{source_id}:{key_hash}:{item_id}` → JSON，TTL=`UC_POOL_ITEM_TTL_S`。
 - 建议数据字段：`data`、`etag`、`cached_at`、`expires_at`、`stale`、`origin_status`、`ttl_s`。
 
 ### 4.2 Neon PostgreSQL（配置/审计/任务元数据）
@@ -145,7 +151,26 @@ CREATE TABLE jobs (
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ
 );
+
+CREATE TABLE pool_entries (
+  source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,
+  key_hash TEXT NOT NULL,
+  item_id TEXT NOT NULL, -- sha1 of normalized item string
+  content_type TEXT NOT NULL,
+  data_encoding TEXT NOT NULL, -- 'json' | 'text' | 'binary'
+  data JSONB, -- simplified; could be BYTEA for binary
+  created_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (source_id, key_hash, item_id)
+);
 ```
+
+### 4.3 池模式（Stable Endpoint Cache Pool）
+- 目标：为稳定端点累计多条历史项，读取时随机返回，提高可用性与多样性。
+- 关键点：
+  - 去重：对标准化项序列化后取 SHA1 作为 `item_id`。
+  - 读：先读 Redis Set 随机成员；若缺，则从 PG 随机选取并回填 Redis。
+  - 写：从上游抓取后调用池写入，Redis 热缓存 + PG 持久化。
+- 键规范化与哈希：使用 `normalizeKeyString` 与 `keyHash` 计算 `key_hash`。
 
 ---
 
@@ -154,6 +179,7 @@ CREATE TABLE jobs (
 ### 5.1 读取（命中/未命中/陈旧）
 1) 计算规范化键与 `key_hash`；
 2) Redis 读取：
+   - 池键：若为池模式，则从池中随机返回（优先 Redis，兜底 PG），并设置 `ETag=item_id`；条件请求命中返回 304。
    - 命中新鲜 → 返回 200（`X-UC-Cache: HIT`）。
    - 命中陈旧 → 返回 200（`STALE`），后台入队刷新。
    - 未命中 → 入队刷新并返回 202（或在 `Bypass-Cache` 且配额充足时直连上游，成功写回后返回 200）。
@@ -168,6 +194,11 @@ CREATE TABLE jobs (
 - 统一门面：任一直连上游前调用 `RateLimiter.acquire(source_id)`。
 - 实现：Redis 脚本/原子操作（固定窗口/滑动窗口/令牌桶均可）。
 
+### 5.4 池刷新与定时补池
+- Bypass 请求：读时命中池且请求带 `X-UC-Bypass-Cache: true`，异步入队 `/pool:{key}?i=<nonce>` 作业，当前请求不等待。
+- 定时补池：`scheduled-pool-fill.mts` 每分钟执行，队列为空时批量预入队并调用 `runOnce()` 消费，受 `SCHEDULED_POOL_*` 环境变量控制。
+- 失败与重试：继承通用任务/作业重试策略。
+
 ---
 
 ## 6. 配置与环境变量
@@ -176,6 +207,8 @@ CREATE TABLE jobs (
 - `JWT_SECRET` 或 `API_KEY`：对外认证；管理接口单独密钥。
 - `DEFAULT_CACHE_TTL`、`DEFAULT_RATE_PER_MIN`、`DEFAULT_RATE_BURST`：全局默认值。
 - `LOG_LEVEL`、`ENV`（development/staging/production）。
+- `UC_POOL_ITEM_TTL_S`：池项热缓存 TTL（秒，默认 86400）。
+- `SCHEDULED_POOL_SOURCE_ID`、`SCHEDULED_POOL_KEY`、`SCHEDULED_POOL_PREFETCH`、`SCHEDULED_POOL_TIME_BUDGET_MS`。
 - 在 Netlify 控制台为不同环境配置独立变量与密钥。
 
 ---
@@ -270,7 +303,7 @@ CREATE TABLE jobs (
   - `cache-refresh.mts`、`cache-prefetch.mts`、`cache-invalidate.mts`
   - `tasks-run.mts`、`tasks-status.mts`
   - `rate-limit.mts`、`metrics.mts`、`healthz.mts`、`info.mts`
-- Scheduled：`scheduled-refresh.mts`（示例名），在导出的 `config` 中设置 `schedule`。
+- Scheduled：`scheduled-refresh.mts`、`scheduled-pool-fill.mts`，在导出的 `config` 中设置 `schedule`。
 
 ---
 

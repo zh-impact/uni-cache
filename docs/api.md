@@ -32,7 +32,7 @@
 - `Cache-Control`：对下游客户端的建议缓存策略（不替代服务端缓存）。
 - 限速头（针对本服务对上游的配额，而非下游客户端）：`X-RateLimit-Limit`、`X-RateLimit-Remaining`、`X-RateLimit-Reset`。
 - `X-UC-Trace-Id: <id>`：请求级唯一标识（与错误响应 `request_id` 对应）。
-- `X-UC-Served-From: redis | postgres | upstream | stale | memory`：本次响应来源。
+- `X-UC-Served-From: redis | postgres | upstream | stale | memory | pool-redis | pool-pg`：本次响应来源（池模式命中时为 `pool-redis` 或 `pool-pg`）。
 - `X-UC-Origin-Status: <int>`：最近一次上游抓取的 HTTP 状态码（可选）。
 - `X-UC-Source-Id: <source_id>`：当前命中的源标识。
 
@@ -168,6 +168,85 @@
 ### GET /api/v1/cache/{source_id}/{key}/meta
 - 描述：仅返回元数据，不含正文。
 - 响应 200：`{"key":"...","cached_at":"...","stale":false,...}`
+
+### 池模式（Stable Endpoint Cache Pool）
+- 场景：对于“稳定端点（如随机语录）”，我们维护一个持久化的“池”。读取同一个 `key`（例如 `/quotes`）时，将从池中随机返回一条历史抓取项，而不是只维护单条缓存。
+- 读取方式：沿用同一读取端点 `GET /api/v1/cache/{source_id}/{key}`。当该 `key` 有池数据时，优先返回随机池项；否则按常规缓存逻辑。
+- 响应特性：
+  - 头：`X-UC-Served-From: pool-redis | pool-pg`；`ETag: <item_id>`（为池项唯一 ID）。
+  - 条件请求：`If-None-Match` 命中 `ETag`（item_id）时返回 304。
+  - 体：
+    ```json
+    {
+      "data": { "quote": "..." },
+      "meta": {
+        "source_id": "quotes",
+        "key": "/quotes",
+        "pool": true,
+        "item_id": "<sha1>",
+        "content_type": "application/json",
+        "data_encoding": "json",
+        "served_from": "pool-redis"
+      }
+    }
+    ```
+- 刷新提示：当客户端发送 `X-UC-Bypass-Cache: true` 且命中池时，不会阻塞当前请求，而是异步入队一个“池刷新作业”以增量补池。
+- 内部约定（了解即可）：池刷新作业使用特殊键格式 `/pool:{key}?i=<nonce>`，其中 `nonce` 用于绕过队列去重；运行器检测以 `/pool:` 开头的作业并将上游返回加入池。
+
+#### 定时补池（平台定时任务）
+- 函数：`netlify/functions/scheduled-pool-fill.mts` 每分钟运行一次。
+- 行为：当某源队列为空时，批量把 `/pool:{key}?i=<nonce>` 作业预入队（条数可控），随后以一个较小的时间预算调用共享运行器 `runOnce()` 消费这些作业。
+- 环境变量：
+  - `SCHEDULED_POOL_SOURCE_ID`：源 ID。
+  - `SCHEDULED_POOL_KEY`：池键（如 `/quotes`）。
+  - `SCHEDULED_POOL_PREFETCH`：每次预入队数量（默认 2；建议与上游每分钟限速一致）。
+  - `SCHEDULED_POOL_TIME_BUDGET_MS`：本次 `runOnce` 的时间预算（毫秒，默认 3000）。
+  - `UC_POOL_ITEM_TTL_S`：池项在 Redis 的热缓存 TTL（秒，默认 86400）。
+
+#### 示例：随机语录池（End-to-End）
+1) 创建源 `quotes`（限速 2/min，键模板为稳定端点 `/quotes`）
+```json
+{
+  "id": "quotes",
+  "name": "Random Quotes",
+  "base_url": "https://api.example.com",
+  "rate_limit": {"per_minute": 2},
+  "cache_ttl_s": 86400,
+  "key_template": "/quotes"
+}
+```
+
+2) 配置平台定时补池（Netlify 环境变量）
+- `SCHEDULED_POOL_SOURCE_ID=quotes`
+- `SCHEDULED_POOL_KEY=/quotes`
+- `SCHEDULED_POOL_PREFETCH=2`
+- `SCHEDULED_POOL_TIME_BUDGET_MS=3000`
+
+3) 读取池（随机返回池项）
+- 请求：`GET /api/v1/cache/quotes/%2Fquotes`
+- 响应体（示例）：
+```json
+{
+  "data": {"quote": "Stay hungry, stay foolish."},
+  "meta": {
+    "source_id": "quotes",
+    "key": "/quotes",
+    "pool": true,
+    "item_id": "4a1c...",
+    "content_type": "application/json",
+    "data_encoding": "json",
+    "served_from": "pool-redis"
+  }
+}
+```
+- 响应头（要点）：`ETag: <item_id>`，`X-UC-Served-From: pool-redis|pool-pg`
+
+4) 条件请求（命中返回 304）
+- 请求头：`If-None-Match: <item_id>` → 响应 `304 Not Modified`
+
+5) 触发后台补池（不阻塞本次读取）
+- 请求头：`X-UC-Bypass-Cache: true`
+- 行为：异步入队 `/pool:/quotes?i=<nonce>` 作业，按限速抓取并入池
 
 ## 4. 刷新 / 预取 / 失效
 

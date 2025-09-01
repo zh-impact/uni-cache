@@ -5,6 +5,7 @@ import { redisQueueKey } from './key.mjs';
 import { acquire } from './rate-limit.mjs';
 import { getCacheEntry, setCacheEntry, computeExpiresAt } from './cache.mjs';
 import type { CacheDataEncoding, CacheEntry, RefreshJob } from './types.mjs';
+import { poolAddItem } from './pool.mjs';
 
 const DEFAULT_MAX_PER_SOURCE = 20; // 每源单次最多处理作业数
 const DEFAULT_TIME_BUDGET_MS = 5_000; // 即时执行时间预算（毫秒）
@@ -193,6 +194,49 @@ export async function runOnce(opts: RunOptions = {}): Promise<RunSummary> {
       }
 
       try {
+        // 池模式：以 "/pool:" 开头的 key 被视为池采集作业
+        const isPoolJob = typeof job.key === 'string' && job.key.startsWith('/pool:');
+        if (isPoolJob) {
+          // 提取池 key（忽略 ?query，用于绕过去重的 nonce）
+          const after = job.key.slice('/pool:'.length);
+          const poolWithQS = after.length > 0 ? after : '/';
+          const pool_key = poolWithQS.split('?')[0] || '/';
+
+          const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
+          // 对稳定端点不携带条件请求头
+          const dq = parseMaybeObj<Record<string, any>>(src.default_query);
+          const u = new URL(src.base_url);
+          if (dq) {
+            for (const [k, v] of Object.entries(dq)) {
+              if (v == null) continue;
+              if (!u.searchParams.has(k)) u.searchParams.set(k, String(v));
+            }
+          }
+          const url = u.toString();
+          const res = await fetchWithRetry(url, { method: 'GET', headers }, { attempts: 2, baseDelayMs: 200, timeoutMs: 2500 });
+
+          if (!res.ok) {
+            if (res.status === 429 || res.status === 502 || res.status === 503) {
+              const nextAttempts = (job.attempts ?? 0) + 1;
+              if (nextAttempts <= MAX_ATTEMPTS) {
+                const requeue = { ...job, attempts: nextAttempts } as RefreshJob;
+                await redis.rpush(qkey, JSON.stringify(requeue));
+              }
+              console.warn('requeue pool due to upstream', { source_id: src.id, key: job.key, status: res.status, next_attempts: nextAttempts });
+            }
+            perSource[src.id].errors++;
+            console.warn('origin non-2xx (pool)', { source_id: src.id, key: job.key, status: res.status });
+            continue;
+          }
+
+          const { data, encoding, contentType } = await pickDataAndEncoding(res);
+          await poolAddItem(src.id, pool_key, { data, encoding, content_type: contentType ?? null });
+          perSource[src.id].updated++;
+          console.log('pool item added', { source_id: src.id, pool_key, status: res.status, content_type: contentType, encoding });
+          continue;
+        }
+
+        // 常规模式：单条 key 缓存
         // 条件请求：若已有缓存则携带 ETag/If-Modified-Since
         const prev: CacheEntry | null = await getCacheEntry(src.id, job.key);
         const headers = ensureHeaders(parseMaybeObj<Record<string, string>>(src.default_headers));
