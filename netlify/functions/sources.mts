@@ -35,8 +35,8 @@ export default async (req: Request, _context: Context) => {
       return json({ error: 'id is required' }, 422);
     }
 
-    // 创建（占位实现）：直接回显请求体，并补齐默认字段。
-    // 读取 body 后
+    // 创建：若 id 已存在则返回 409 Conflict，避免覆盖已有 Source。
+    // 使用 ON CONFLICT DO NOTHING + RETURNING 防止并发竞态下的重复插入。
     const created = await sql/*sql*/`
     INSERT INTO sources (id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template)
     VALUES (
@@ -49,17 +49,12 @@ export default async (req: Request, _context: Context) => {
       ${body.cache_ttl_s ?? 600},
       ${body.key_template ?? '/'}
     )
-    ON CONFLICT (id) DO UPDATE SET
-      name = EXCLUDED.name,
-      base_url = EXCLUDED.base_url,
-      default_headers = EXCLUDED.default_headers,
-      default_query = EXCLUDED.default_query,
-      rate_limit = EXCLUDED.rate_limit,
-      cache_ttl_s = EXCLUDED.cache_ttl_s,
-      key_template = EXCLUDED.key_template,
-      updated_at = now()
+    ON CONFLICT (id) DO NOTHING
     RETURNING id, name, base_url, default_headers, default_query, rate_limit, cache_ttl_s, key_template
     `;
+    if (!created.length) {
+      return json({ error: 'Source already exists', id: body.id }, 409);
+    }
     return json(created[0], 201);
   }
 
